@@ -1,0 +1,72 @@
+require('dotenv').config();
+const express    = require('express');
+const cors       = require('cors');
+const rateLimit  = require('express-rate-limit');
+
+const { errorHandler } = require('./middleware/error');
+
+const authRoutes     = require('./routes/auth');
+const userRoutes     = require('./routes/users');
+const postRoutes     = require('./routes/posts');
+const reactionRoutes = require('./routes/reactions');
+const friendRoutes   = require('./routes/friends');
+const zoneRoutes     = require('./routes/zones');
+const uploadRoutes   = require('./routes/uploads');
+
+const app = express();
+
+// ── CORS ─────────────────────────────────────────────────────────────────────
+// Allows Flutter web debug builds and future web clients.
+// In production, lock this down to your domain(s).
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// ── Body parsing ─────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '1mb' }));
+
+// ── Rate limiting ────────────────────────────────────────────────────────────
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many OTP requests — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(generalLimiter);
+
+// ── Health check ─────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ── Routes ───────────────────────────────────────────────────────────────────
+app.use('/auth',                     otpLimiter, authRoutes);
+app.use('/users',                    userRoutes);
+app.use('/posts',                    postRoutes);
+app.use('/posts/:postId/reactions',  reactionRoutes);
+app.use('/friends',                  friendRoutes);
+app.use('/zones',                    zoneRoutes);
+app.use('/upload-url',               uploadRoutes);
+
+// Convenience: /users/:userId/posts
+app.use('/users/:userId/posts', (req, res, next) => {
+  req.params.userId = req.params.userId;
+  next();
+}, postRoutes);
+
+// ── 404 ──────────────────────────────────────────────────────────────────────
+app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
+
+// ── Error handler ─────────────────────────────────────────────────────────────
+app.use(errorHandler);
+
+module.exports = app;
