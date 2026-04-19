@@ -61,7 +61,7 @@ async function sendSms(phone, code) {
   await twilioClient.messages.create({
     to: phone,
     from: process.env.TWILIO_PHONE_NUMBER,
-    body: `Your Grounders code: ${code}. Valid for 10 minutes.`,
+    body: `Your Grounders code is: ${code}.`,
   });
 }
 
