@@ -1,14 +1,14 @@
 {
   "name": "grounders-api",
   "version": "1.0.0",
-  "description": "Grounders backend \u2014 real posts, real places, real time",
+  "description": "Grounders backend — real posts, real places, real time",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "migrate": "node src/db/migrate.js"
   },
- "dependencies": {
+  "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
     "bcryptjs": "^2.4.3",
@@ -20,7 +20,6 @@
     "pg": "^8.11.5",
     "twilio": "^5.3.4",
     "uuid": "^9.0.1"
-}
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
