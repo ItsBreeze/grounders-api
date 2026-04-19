@@ -1,4 +1,92 @@
-const router  = require('express').Router();
+> grounders-api@1.0.0 start
+> node src/server.js
+/app/src/routes/auth.js:169
+module.exports = router;const jwt = require('jsonwebtoken');
+                              ^
+SyntaxError: Identifier 'jwt' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1637:18)
+    at Module._compile (node:internal/modules/cjs/loader:1679:20)
+    at Object..js (node:internal/modules/cjs/loader:1838:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Module.require (node:internal/modules/cjs/loader:1463:12)
+    at require (node:internal/modules/helpers:147:16)
+    at Object.<anonymous> (/app/src/app.js:8:24)
+Node.js v22.22.2
+npm warn config production Use `--omit=dev` instead.
+> grounders-api@1.0.0 start
+> node src/server.js
+/app/src/routes/auth.js:169
+module.exports = router;const jwt = require('jsonwebtoken');
+                              ^
+SyntaxError: Identifier 'jwt' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1637:18)
+    at Module._compile (node:internal/modules/cjs/loader:1679:20)
+    at Object..js (node:internal/modules/cjs/loader:1838:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Module.require (node:internal/modules/cjs/loader:1463:12)
+    at require (node:internal/modules/helpers:147:16)
+    at Object.<anonymous> (/app/src/app.js:8:24)
+Node.js v22.22.2
+Node.js v22.22.2
+npm warn config production Use `--omit=dev` instead.
+> grounders-api@1.0.0 start
+> node src/server.js
+/app/src/routes/auth.js:169
+module.exports = router;const jwt = require('jsonwebtoken');
+                              ^
+SyntaxError: Identifier 'jwt' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1637:18)
+    at Module._compile (node:internal/modules/cjs/loader:1679:20)
+    at Object..js (node:internal/modules/cjs/loader:1838:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Module.require (node:internal/modules/cjs/loader:1463:12)
+    at require (node:internal/modules/helpers:147:16)
+    at Object.<anonymous> (/app/src/app.js:8:24)
+npm warn config production Use `--omit=dev` instead.
+> grounders-api@1.0.0 start
+> node src/server.js
+/app/src/routes/auth.js:169
+module.exports = router;const jwt = require('jsonwebtoken');
+                              ^
+SyntaxError: Identifier 'jwt' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1637:18)
+    at Module._compile (node:internal/modules/cjs/loader:1679:20)
+    at Object..js (node:internal/modules/cjs/loader:1838:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Module.require (node:internal/modules/cjs/loader:1463:12)
+    at require (node:internal/modules/helpers:147:16)
+    at Object.<anonymous> (/app/src/app.js:8:24)
+Node.js v22.22.2
+npm warn config production Use `--omit=dev` instead.
+> grounders-api@1.0.0 start
+> node src/server.js
+/app/src/routes/auth.js:169
+module.exports = router;const jwt = require('jsonwebtoken');
+                              ^
+SyntaxError: Identifier 'jwt' has already been declared
+    at wrapSafe (node:internal/modules/cjs/loader:1637:18)
+    at Module._compile (node:internal/modules/cjs/loader:1679:20)
+    at Object..js (node:internal/modules/cjs/loader:1838:10)
+    at Module.load (node:internal/modules/cjs/loader:1441:32)
+    at Function._load (node:internal/modules/cjs/loader:1263:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:237:24)
+    at Module.require (node:internal/modules/cjs/loader:1463:12)
+    at require (node:internal/modules/helpers:147:16)
+    at Object.<anonymous> (/app/src/app.js:8:24)
+Node.js v22.22.2const router  = require('express').Router();
 const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const crypto  = require('crypto');
