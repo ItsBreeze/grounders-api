@@ -15,7 +15,7 @@ const { requireAuth } = require('../middleware/auth');
 const { haversineMetres } = require('../utils/geo');
 const { canonicalPair } = require('../utils/friends');
 
-router.use(requireAuth);
+router.post('/', requireAuth, async (req, res, next) => {
 
 // ── POST /posts ──────────────────────────────────────────────────────────────
 
