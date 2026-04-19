@@ -1,11 +1,8 @@
 /**
  * Auth routes
  *
- * POST /auth/request-otp   — send a 6-digit OTP to phone or email
+ * POST /auth/request-otp   — send a 6-digit OTP via SMS (Twilio) or log in DEV_MODE
  * POST /auth/verify-otp    — verify OTP, create user if new, return JWT
- *
- * In DEV_MODE the OTP is returned directly in the response instead of
- * being sent via SMS/email, so you can test without a provider configured.
  */
 
 const router = require('express').Router();
@@ -16,7 +13,22 @@ const pool = require('../db/pool');
 
 const OTP_EXPIRY_MS = (parseInt(process.env.OTP_EXPIRY_MINUTES) || 10) * 60 * 1000;
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Twilio client (only initialised when credentials present) ─────────────────
+let twilioClient = null;
+if (
+  process.env.TWILIO_ACCOUNT_SID &&
+  process.env.TWILIO_AUTH_TOKEN &&
+  process.env.TWILIO_PHONE_NUMBER &&
+  process.env.DEV_MODE !== 'true'
+) {
+  const twilio = require('twilio');
+  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  console.log('[auth] Twilio SMS enabled');
+} else {
+  console.log('[auth] DEV_MODE — OTP returned in response, no SMS sent');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function generateOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -28,23 +40,16 @@ function issueToken(userId) {
   });
 }
 
-/**
- * In production replace this with Twilio (SMS) / SendGrid (email).
- * Returns the code so DEV_MODE can echo it back.
- */
-async function sendOtp(target, code, type) {
-  if (process.env.DEV_MODE === 'true') {
-    console.log(`[DEV] OTP for ${target}: ${code}`);
-    return; // will be returned in response body
-  }
-  if (type === 'phone') {
-    // await twilioClient.messages.create({ to: target, from: ..., body: `Your Grounders code: ${code}` });
-  } else {
-    // await sendgrid.send({ to: target, subject: 'Your Grounders code', text: `Code: ${code}` });
-  }
+async function sendSms(phone, code) {
+  if (!twilioClient) return; // DEV_MODE — skip
+  await twilioClient.messages.create({
+    to: phone,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    body: `Your Grounders code: ${code}. Valid for 10 minutes.`,
+  });
 }
 
-// ── POST /auth/request-otp ──────────────────────────────────────────────────
+// ── POST /auth/request-otp ────────────────────────────────────────────────────
 
 router.post('/request-otp', async (req, res, next) => {
   try {
@@ -70,15 +75,16 @@ router.post('/request-otp', async (req, res, next) => {
     );
 
     await pool.query(
-      `INSERT INTO otps (id, target, code_hash, expires_at)
-       VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO otps (id, target, code_hash, expires_at) VALUES ($1, $2, $3, $4)`,
       [uuid(), target, hash, expiresAt]
     );
 
-    await sendOtp(target, code, type);
+    if (type === 'phone') {
+      await sendSms(target, code);
+    }
 
     const body = { message: 'OTP sent' };
-    if (process.env.DEV_MODE === 'true') body._dev_otp = code;
+    if (!twilioClient) body._dev_otp = code; // only expose in DEV_MODE
 
     res.json(body);
   } catch (err) {
@@ -86,7 +92,7 @@ router.post('/request-otp', async (req, res, next) => {
   }
 });
 
-// ── POST /auth/verify-otp ───────────────────────────────────────────────────
+// ── POST /auth/verify-otp ─────────────────────────────────────────────────────
 
 router.post('/verify-otp', async (req, res, next) => {
   try {
@@ -97,37 +103,28 @@ router.post('/verify-otp', async (req, res, next) => {
 
     const target = phone || email;
 
-    // Find the most recent valid OTP
     const { rows: otpRows } = await pool.query(
       `SELECT * FROM otps
        WHERE target = $1 AND used = false AND expires_at > NOW()
-       ORDER BY created_at DESC
-       LIMIT 1`,
+       ORDER BY created_at DESC LIMIT 1`,
       [target]
     );
 
     if (!otpRows.length) {
-      return res.status(401).json({ error: 'No valid OTP found — request a new one' });
+      return res.status(401).json({ error: 'Code expired — request a new one' });
     }
 
-    const otp = otpRows[0];
-    const valid = await bcrypt.compare(code, otp.code_hash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Incorrect code' });
-    }
+    const valid = await bcrypt.compare(code, otpRows[0].code_hash);
+    if (!valid) return res.status(401).json({ error: 'Incorrect code' });
 
-    // Mark OTP used
-    await pool.query(`UPDATE otps SET used = true WHERE id = $1`, [otp.id]);
+    await pool.query(`UPDATE otps SET used = true WHERE id = $1`, [otpRows[0].id]);
 
-    // Upsert user — create on first login, return existing on subsequent
     const col = phone ? 'phone' : 'email';
     let { rows: userRows } = await pool.query(
-      `SELECT * FROM users WHERE ${col} = $1`,
-      [target]
+      `SELECT * FROM users WHERE ${col} = $1`, [target]
     );
 
-    let user;
-    let isNew = false;
+    let user, isNew = false;
 
     if (userRows.length) {
       user = userRows[0];
@@ -135,9 +132,7 @@ router.post('/verify-otp', async (req, res, next) => {
       isNew = true;
       const name = display_name?.trim() || '';
       ({ rows: [user] } = await pool.query(
-        `INSERT INTO users (id, display_name, ${col})
-         VALUES ($1, $2, $3)
-         RETURNING *`,
+        `INSERT INTO users (id, display_name, ${col}) VALUES ($1, $2, $3) RETURNING *`,
         [uuid(), name, target]
       ));
     }
