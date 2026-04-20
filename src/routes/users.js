@@ -37,8 +37,9 @@ router.patch('/me', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /users/:id/friends — returns target's friends, excluding the viewer.
-// `is_mutual` indicates whether the viewer is also friends with that person.
+// GET /users/:id/friends — returns target's friends list. The viewer is
+// INCLUDED in the response for now (testing). `is_mutual` indicates
+// whether the viewer is also friends with that person.
 // Must come before the generic /:id route.
 router.get('/:id/friends', async (req, res, next) => {
   try {
@@ -57,8 +58,7 @@ router.get('/:id/friends', async (req, res, next) => {
        FROM friendships f
        JOIN users u
          ON u.id = CASE WHEN f.user_id_a = $2 THEN f.user_id_b ELSE f.user_id_a END
-       WHERE (f.user_id_a = $2 OR f.user_id_b = $2)
-         AND u.id <> $1
+       WHERE f.user_id_a = $2 OR f.user_id_b = $2
        ORDER BY u.display_name`,
       [myId, targetId]
     );
