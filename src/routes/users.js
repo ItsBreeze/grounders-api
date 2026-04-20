@@ -10,8 +10,7 @@ router.get('/me', async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT u.*,
               COUNT(DISTINCT p.id) AS post_count,
-              COUNT(DISTINCT f.user_id_a || f.user_id_b) AS friend_count
-       FROM users u
+COUNT(DISTINCT f.user_id_a::text || f.user_id_b::text) AS friend_count       FROM users u
        LEFT JOIN posts p ON p.user_id = u.id
        LEFT JOIN friendships f ON f.user_id_a = u.id OR f.user_id_b = u.id
        WHERE u.id = $1
