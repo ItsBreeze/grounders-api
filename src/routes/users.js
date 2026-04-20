@@ -62,7 +62,8 @@ router.get('/:id/friends', async (req, res, next) => {
                      WHEN f.user_id_a = $2 THEN f.user_id_b
                      ELSE f.user_id_a
                    END
-       WHERE f.user_id_a = $2 OR f.user_id_b = $2
+       WHERE (f.user_id_a = $2 OR f.user_id_b = $2)
+  AND u.id != $1
        ORDER BY u.display_name`,
       [myId, targetId]
     );
