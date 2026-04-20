@@ -37,17 +37,13 @@ router.patch('/me', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── GET /users/:id/friends ───────────────────────────────────────────
-// Returns the target user's friends list with an is_mutual flag per row.
-// EXCLUDES the viewer from the list — they already know they're friends
-// with the target and shouldn't see themselves as a potential request
-// recipient.
-// MUST be declared before the generic `/:id` route below.
+// GET /users/:id/friends — returns target's friends, excluding the viewer.
+// `is_mutual` indicates whether the viewer is also friends with that person.
+// Must come before the generic /:id route.
 router.get('/:id/friends', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const targetId = req.params.id;
-
     const { rows } = await pool.query(
       `SELECT
          u.id,
@@ -60,16 +56,12 @@ router.get('/:id/friends', async (req, res, next) => {
          ) AS is_mutual
        FROM friendships f
        JOIN users u
-         ON u.id = CASE
-                     WHEN f.user_id_a = $2 THEN f.user_id_b
-                     ELSE f.user_id_a
-                   END
+         ON u.id = CASE WHEN f.user_id_a = $2 THEN f.user_id_b ELSE f.user_id_a END
        WHERE (f.user_id_a = $2 OR f.user_id_b = $2)
          AND u.id <> $1
        ORDER BY u.display_name`,
       [myId, targetId]
     );
-
     res.json(rows);
   } catch (err) { next(err); }
 });
