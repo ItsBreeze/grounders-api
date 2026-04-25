@@ -1,11 +1,10 @@
 /**
  * Reactions routes
  *
- * PUT    /posts/:postId/reactions   — upsert reaction (change or set emoji)
- * DELETE /posts/:postId/reactions   — remove my reaction
- * GET    /posts/:postId/reactions   — list all reactions on a post
+ * PUT    /posts/:postId/reactions  — upsert reaction (change or set emoji)
+ * DELETE /posts/:postId/reactions  — remove my reaction
+ * GET    /posts/:postId/reactions  — list all reactions on a post
  */
-
 const router = require('express').Router({ mergeParams: true });
 const pool = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
@@ -13,18 +12,44 @@ const { canonicalPair } = require('../utils/friends');
 
 router.use(requireAuth);
 
-const ALLOWED_EMOJIS = ['👍', '❤️', '🔥', '😮', '😂'];
+// Hard cap on the stored emoji string. A single complex emoji (e.g. a
+// family-of-5 ZWJ sequence with skin tones) maxes out around 35 chars;
+// 64 leaves headroom without allowing abuse.
+const MAX_EMOJI_LENGTH = 64;
+
+/**
+ * Validates that `s` is a non-empty string consisting entirely of
+ * emoji-related Unicode codepoints, with at least one actual pictograph
+ * (or a flag). Rejects plain text, whitespace, and oversized payloads.
+ *
+ * Allowed codepoint classes:
+ *   - Extended_Pictographic  (the actual emoji glyphs)
+ *   - Emoji_Component        (skin tones, hair components, keycap digits)
+ *   - Regional_Indicator     (the two-letter flag building blocks)
+ *   - U+200D (ZWJ)           joiner for compound emojis
+ *   - U+FE0F (VS16)          emoji-presentation variation selector
+ */
+function isValidEmoji(s) {
+  if (typeof s !== 'string') return false;
+  if (s.length === 0 || s.length > MAX_EMOJI_LENGTH) return false;
+
+  // Must contain at least one pictograph or regional indicator —
+  // otherwise a bare digit like "1" would pass via Emoji_Component.
+  if (!/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(s)) return false;
+
+  // Every codepoint must belong to one of the emoji-related classes.
+  return /^[\p{Extended_Pictographic}\p{Emoji_Component}\p{Regional_Indicator}\u200D\uFE0F]+$/u.test(s);
+}
 
 // ── PUT /posts/:postId/reactions ─────────────────────────────────────────────
-
 router.put('/', async (req, res, next) => {
   try {
     const { emoji } = req.body;
     const myId = req.user.id;
     const postId = req.params.postId;
 
-    if (!ALLOWED_EMOJIS.includes(emoji)) {
-      return res.status(400).json({ error: `emoji must be one of: ${ALLOWED_EMOJIS.join(' ')}` });
+    if (!isValidEmoji(emoji)) {
+      return res.status(400).json({ error: 'emoji must be a valid emoji character' });
     }
 
     // Verify post exists and user can react
@@ -58,7 +83,6 @@ router.put('/', async (req, res, next) => {
 });
 
 // ── DELETE /posts/:postId/reactions ─────────────────────────────────────────
-
 router.delete('/', async (req, res, next) => {
   try {
     await pool.query(
@@ -73,7 +97,6 @@ router.delete('/', async (req, res, next) => {
 });
 
 // ── GET /posts/:postId/reactions ─────────────────────────────────────────────
-
 router.get('/', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
