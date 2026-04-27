@@ -4,6 +4,7 @@ const pool = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const { haversineMetres } = require('../utils/geo');
 const { canonicalPair } = require('../utils/friends');
+const notifications = require('../services/notifications');
 
 router.use(requireAuth);
 
@@ -42,7 +43,8 @@ router.post('/', async (req, res, next) => {
     );
 
     const { rows: [user] } = await client.query(
-      `SELECT last_post_lat, last_post_lng, total_distance_m FROM users WHERE id = $1`, [userId]
+      `SELECT display_name, last_post_lat, last_post_lng, total_distance_m FROM users WHERE id = $1`,
+      [userId]
     );
 
     let addedDistance = 0;
@@ -59,6 +61,33 @@ router.post('/', async (req, res, next) => {
     );
 
     await client.query('COMMIT');
+
+    notifications.fireAndForget((async () => {
+      const { rows: friendRows } = await pool.query(
+        `SELECT CASE WHEN user_id_a = $1 THEN user_id_b ELSE user_id_a END AS friend_id
+         FROM friendships WHERE user_id_a = $1 OR user_id_b = $1`,
+        [userId]
+      );
+      if (!friendRows.length) return;
+      const friendIds = friendRows.map(r => r.friend_id);
+      const posterName = user.display_name?.trim() || 'A friend';
+      const bodyByType = {
+        photo: 'just shared a photo',
+        video: 'just shared a video',
+        audio: 'just shared audio',
+      };
+      return notifications.sendToUsers(friendIds, {
+        title: 'New post',
+        body:  `${posterName} ${bodyByType[type]}`,
+        data:  {
+          type: 'new_post',
+          post_id: postId,
+          from_user_id: userId,
+          post_type: type,
+        },
+      });
+    })());
+
     res.status(201).json(formatPost(post));
   } catch (err) {
     await client.query('ROLLBACK');
