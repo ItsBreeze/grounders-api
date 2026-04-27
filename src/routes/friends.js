@@ -1,16 +1,9 @@
 /**
  * Friends routes
  *
- * GET    /friends                       — my friends list
- * GET    /friends/requests              — pending requests (inbound + outbound)
- * POST   /friends/requests              — send a friend request
- * POST   /friends/requests/:id/accept   — accept an inbound request
- * DELETE /friends/requests/:id          — decline or cancel a request
- * DELETE /friends/:userId               — unfriend (removes both directions atomically)
- *
- * Key invariant: friendships table stores exactly one canonical row per pair,
- * with user_id_a < user_id_b. Deleting that row ends the friendship for BOTH users
- * with zero extra work — there is no other row to clean up.
+ * Push notifications fired (fire-and-forget) on:
+ *   - new request → recipient
+ *   - accept       → original sender
  */
 
 const router = require('express').Router();
@@ -18,10 +11,9 @@ const { v4: uuid } = require('uuid');
 const pool = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const { canonicalPair } = require('../utils/friends');
+const notifications = require('../services/notifications');
 
 router.use(requireAuth);
-
-// ── GET /friends ─────────────────────────────────────────────────────────────
 
 router.get('/', async (req, res, next) => {
   try {
@@ -44,8 +36,6 @@ router.get('/', async (req, res, next) => {
     next(err);
   }
 });
-
-// ── GET /friends/requests ────────────────────────────────────────────────────
 
 router.get('/requests', async (req, res, next) => {
   try {
@@ -75,15 +65,11 @@ router.get('/requests', async (req, res, next) => {
   }
 });
 
-// ── POST /friends/requests ───────────────────────────────────────────────────
-// Body: { to_user_id } OR { phone } OR { email }
-
 router.post('/requests', async (req, res, next) => {
   try {
     const myId = req.user.id;
     let toUserId = req.body.to_user_id;
 
-    // Allow lookup by phone or email
     if (!toUserId && (req.body.phone || req.body.email)) {
       const col = req.body.phone ? 'phone' : 'email';
       const val = req.body.phone || req.body.email;
@@ -98,7 +84,6 @@ router.post('/requests', async (req, res, next) => {
     if (!toUserId) return res.status(400).json({ error: 'Provide to_user_id, phone, or email' });
     if (toUserId === myId) return res.status(400).json({ error: 'Cannot friend yourself' });
 
-    // Check not already friends
     const [a, b] = canonicalPair(myId, toUserId);
     const { rows: existing } = await pool.query(
       `SELECT 1 FROM friendships WHERE user_id_a = $1 AND user_id_b = $2`,
@@ -106,7 +91,6 @@ router.post('/requests', async (req, res, next) => {
     );
     if (existing.length) return res.status(409).json({ error: 'Already friends' });
 
-    // Check for existing pending request in either direction
     const { rows: pendingRows } = await pool.query(
       `SELECT id, from_user_id FROM friend_requests
        WHERE status = 'pending'
@@ -117,7 +101,6 @@ router.post('/requests', async (req, res, next) => {
 
     if (pendingRows.length) {
       const pending = pendingRows[0];
-      // If the other person already sent us a request, auto-accept
       if (pending.from_user_id === toUserId) {
         return acceptRequest(pending.id, myId, res);
       }
@@ -131,13 +114,25 @@ router.post('/requests', async (req, res, next) => {
       [uuid(), myId, toUserId]
     );
 
+    notifications.fireAndForget((async () => {
+      const { rows } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
+      const senderName = rows[0]?.display_name?.trim() || 'Someone';
+      return notifications.sendToUser(toUserId, {
+        title: 'New friend request',
+        body:  `${senderName} wants to be friends`,
+        data:  {
+          type: 'friend_request',
+          request_id: request.id,
+          from_user_id: myId,
+        },
+      });
+    })());
+
     res.status(201).json({ request_id: request.id, status: 'pending' });
   } catch (err) {
     next(err);
   }
 });
-
-// ── POST /friends/requests/:id/accept ───────────────────────────────────────
 
 router.post('/requests/:id/accept', async (req, res, next) => {
   try {
@@ -146,9 +141,6 @@ router.post('/requests/:id/accept', async (req, res, next) => {
     next(err);
   }
 });
-
-// ── DELETE /friends/requests/:id ─────────────────────────────────────────────
-// Used for both declining inbound and cancelling outbound requests
 
 router.delete('/requests/:id', async (req, res, next) => {
   try {
@@ -166,10 +158,6 @@ router.delete('/requests/:id', async (req, res, next) => {
     next(err);
   }
 });
-
-// ── DELETE /friends/:userId ──────────────────────────────────────────────────
-// Atomically removes the canonical friendship row.
-// Both users lose each other as a friend simultaneously — no second query needed.
 
 router.delete('/:userId', async (req, res, next) => {
   try {
@@ -189,8 +177,6 @@ router.delete('/:userId', async (req, res, next) => {
   }
 });
 
-// ── Shared accept helper ─────────────────────────────────────────────────────
-
 async function acceptRequest(requestId, acceptingUserId, res) {
   const client = await pool.connect();
   try {
@@ -206,21 +192,32 @@ async function acceptRequest(requestId, acceptingUserId, res) {
       return res.status(404).json({ error: 'Request not found or not addressed to you' });
     }
 
-    const req = rows[0];
-    const [a, b] = canonicalPair(req.from_user_id, req.to_user_id);
+    const fr = rows[0];
+    const [a, b] = canonicalPair(fr.from_user_id, fr.to_user_id);
 
-    // Create canonical friendship row
     await client.query(
       `INSERT INTO friendships (user_id_a, user_id_b) VALUES ($1, $2)
        ON CONFLICT DO NOTHING`,
       [a, b]
     );
-
-    // Remove the request row (clean up, no longer needed)
     await client.query(`DELETE FROM friend_requests WHERE id = $1`, [requestId]);
 
     await client.query('COMMIT');
-    res.json({ friended: true, friend_id: req.from_user_id });
+
+    notifications.fireAndForget((async () => {
+      const { rows } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [acceptingUserId]);
+      const accepterName = rows[0]?.display_name?.trim() || 'Someone';
+      return notifications.sendToUser(fr.from_user_id, {
+        title: 'Friend request accepted',
+        body:  `You and ${accepterName} are now friends`,
+        data:  {
+          type: 'friend_accepted',
+          user_id: acceptingUserId,
+        },
+      });
+    })());
+
+    res.json({ friended: true, friend_id: fr.from_user_id });
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
