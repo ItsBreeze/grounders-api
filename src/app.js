@@ -14,6 +14,7 @@ const zoneRoutes     = require('./routes/zones');
 const uploadRoutes   = require('./routes/uploads');
 const deviceRoutes   = require('./routes/devices');
 const blockRoutes    = require('./routes/blocks');
+const reportRoutes   = require('./routes/reports');
 
 require('./services/notifications');
 
@@ -50,6 +51,7 @@ app.use('/auth',                     otpLimiter, authRoutes);
 app.use('/users',                    userRoutes);
 app.use('/posts',                    postRoutes);
 app.use('/posts/:postId/reactions',  reactionRoutes);
+app.use('/posts',                    reportRoutes);
 app.use('/friends',                  friendRoutes);
 app.use('/zones',                    zoneRoutes);
 app.use('/upload-url',               uploadRoutes);
@@ -65,4 +67,4 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 app.use(errorHandler);
 
-module.exports = app;  
+module.exports = app;
