@@ -77,6 +77,11 @@ router.post('/request-otp', async (req, res, next) => {
     if (!phone && !email) return res.status(400).json({ error: 'Provide phone or email' });
     if (phone && email) return res.status(400).json({ error: 'Provide only one of phone or email' });
 
+    // Reviewer phone — pretend success without sending SMS or storing OTP.
+    if (phone && process.env.APP_REVIEW_PHONE && phone === process.env.APP_REVIEW_PHONE) {
+      return res.json({ message: 'OTP sent' });
+    }
+
     const target = phone || email;
     const type   = phone ? 'phone' : 'email';
     const code   = generateOtp();
@@ -103,6 +108,42 @@ router.post('/verify-otp', async (req, res, next) => {
     if (!phone && !email) return res.status(400).json({ error: 'Provide phone or email' });
     if (!code) return res.status(400).json({ error: 'Provide code' });
 
+    // ── Reviewer backdoor ─────────────────────────────────────────────
+    // App Store / Play Console reviewers can't receive SMS. When the
+    // request matches the reviewer env vars, mint tokens for the
+    // pre-seeded reviewer user and skip the OTP table entirely. With
+    // both vars unset this branch is dead code.
+    if (
+      process.env.APP_REVIEW_PHONE &&
+      process.env.APP_REVIEW_OTP &&
+      phone === process.env.APP_REVIEW_PHONE &&
+      code === process.env.APP_REVIEW_OTP
+    ) {
+      const { rows } = await pool.query(
+        `SELECT * FROM users WHERE phone = $1`,
+        [phone]
+      );
+      if (!rows.length) {
+        return res.status(500).json({ error: 'Reviewer user missing — run the migration' });
+      }
+      const reviewer = rows[0];
+      // Clear any pending deletion in case the reviewer previously deleted.
+      if (reviewer.deletion_pending_at) {
+        await pool.query(
+          `UPDATE users SET deletion_pending_at = NULL WHERE id = $1`,
+          [reviewer.id]
+        );
+      }
+      const accessToken  = issueAccessToken(reviewer.id);
+      const refreshToken = await storeRefreshToken(reviewer.id, generateRefreshToken());
+      return res.json({
+        token: accessToken,
+        refresh_token: refreshToken,
+        user: sanitizeUser(reviewer),
+        is_new: false,
+      });
+    }
+
     const target = phone || email;
     const { rows: otpRows } = await pool.query(
       `SELECT * FROM otps WHERE target = $1 AND used = false AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
@@ -121,6 +162,14 @@ router.post('/verify-otp', async (req, res, next) => {
     let user, isNew = false;
     if (userRows.length) {
       user = userRows[0];
+      // Returning user signing back in cancels a pending account deletion.
+      if (user.deletion_pending_at) {
+        await pool.query(
+          `UPDATE users SET deletion_pending_at = NULL WHERE id = $1`,
+          [user.id]
+        );
+        user.deletion_pending_at = null;
+      }
     } else {
       isNew = true;
       const name = display_name?.trim() || '';
