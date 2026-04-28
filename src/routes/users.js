@@ -37,10 +37,34 @@ router.patch('/me', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /users/:id/friends — returns target's friends list. The viewer is
-// INCLUDED in the response for now (testing). `is_mutual` indicates
-// whether the viewer is also friends with that person.
-// Must come before the generic /:id route.
+// DELETE /users/me — soft-delete with 14-day grace period.
+// Required by Apple guideline 5.1.1(v). Reaper hard-deletes after 14 days.
+// Signing back in clears deletion_pending_at (see auth.js).
+router.delete('/me', async (req, res, next) => {
+  try {
+    await pool.query(
+      `UPDATE users
+          SET deletion_pending_at = NOW()
+        WHERE id = $1
+          AND deletion_pending_at IS NULL`,
+      [req.user.id]
+    );
+    // Wipe device tokens immediately — no more pushes.
+    await pool.query(
+      `DELETE FROM device_tokens WHERE user_id = $1`,
+      [req.user.id]
+    );
+    // Wipe refresh tokens — JWT can still be used until expiry,
+    // but they can't refresh it.
+    await pool.query(
+      `DELETE FROM refresh_tokens WHERE user_id = $1`,
+      [req.user.id]
+    );
+    res.json({ deleted: true, hard_delete_in_days: 14 });
+  } catch (err) { next(err); }
+});
+
+// GET /users/:id/friends — must come before generic /:id route.
 router.get('/:id/friends', async (req, res, next) => {
   try {
     const myId = req.user.id;
@@ -58,7 +82,8 @@ router.get('/:id/friends', async (req, res, next) => {
        FROM friendships f
        JOIN users u
          ON u.id = CASE WHEN f.user_id_a = $2 THEN f.user_id_b ELSE f.user_id_a END
-       WHERE f.user_id_a = $2 OR f.user_id_b = $2
+       WHERE (f.user_id_a = $2 OR f.user_id_b = $2)
+         AND u.deletion_pending_at IS NULL
        ORDER BY u.display_name`,
       [myId, targetId]
     );
@@ -71,8 +96,26 @@ router.get('/:id', async (req, res, next) => {
     const targetId = req.params.id;
     const myId = req.user.id;
     if (targetId === myId) return res.redirect('/users/me');
+
+    // Block check.
+    const { rows: blockRows } = await pool.query(
+      `SELECT 1 FROM blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2)
+          OR (blocker_id = $2 AND blocked_id = $1)`,
+      [myId, targetId]
+    );
+    if (blockRows.length) return res.status(404).json({ error: 'User not found' });
+
+    // Pending-deletion check.
+    const { rows: delRows } = await pool.query(
+      `SELECT 1 FROM users WHERE id = $1 AND deletion_pending_at IS NOT NULL`,
+      [targetId]
+    );
+    if (delRows.length) return res.status(404).json({ error: 'User not found' });
+
     const rel = await getRelationship(myId, targetId);
     if (!rel) return res.status(403).json({ error: 'Not connected to this user' });
+
     const { rows } = await pool.query(
       `SELECT u.*, COUNT(DISTINCT p.id) AS post_count
        FROM users u
