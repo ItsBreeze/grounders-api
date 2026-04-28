@@ -13,8 +13,8 @@ const friendRoutes   = require('./routes/friends');
 const zoneRoutes     = require('./routes/zones');
 const uploadRoutes   = require('./routes/uploads');
 const deviceRoutes   = require('./routes/devices');
+const blockRoutes    = require('./routes/blocks');
 
-// Initialize Firebase Admin at boot (no-op if env vars missing)
 require('./services/notifications');
 
 const app = express();
@@ -54,6 +54,7 @@ app.use('/friends',                  friendRoutes);
 app.use('/zones',                    zoneRoutes);
 app.use('/upload-url',               uploadRoutes);
 app.use('/devices',                  deviceRoutes);
+app.use('/',                         blockRoutes);
 
 app.use('/users/:userId/posts', (req, res, next) => {
   req.params.userId = req.params.userId;
@@ -64,4 +65,4 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 app.use(errorHandler);
 
-module.exports = app;
+module.exports = app;  
