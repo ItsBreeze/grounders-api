@@ -118,6 +118,16 @@ router.get('/', async (req, res, next) => {
     const conditions = [
       `p.posted_at < $1`,
       `(p.user_id = ANY($2) OR p.visibility = 'public')`,
+      // Hide posts by users who blocked me OR who I've blocked.
+      `NOT EXISTS (
+        SELECT 1 FROM blocks b
+        WHERE (b.blocker_id = $1 AND b.blocked_id = p.user_id)
+           OR (b.blocked_id = $1 AND b.blocker_id = p.user_id)
+      )`,
+      // Hide posts by users pending deletion.
+      `NOT EXISTS (
+        SELECT 1 FROM users u WHERE u.id = p.user_id AND u.deletion_pending_at IS NOT NULL
+      )`,
     ];
     const params = [before, visibleUserIds];
     let pIdx = 3;
@@ -158,6 +168,22 @@ router.get('/by-user/:userId', async (req, res, next) => {
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const before = req.query.before ? new Date(req.query.before) : new Date();
 
+    // Block check.
+    const { rows: blockRows } = await pool.query(
+      `SELECT 1 FROM blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2)
+          OR (blocker_id = $2 AND blocked_id = $1)`,
+      [myId, targetId]
+    );
+    if (blockRows.length) return res.status(404).json({ error: 'User not found' });
+
+    // Pending-deletion check.
+    const { rows: delRows } = await pool.query(
+      `SELECT 1 FROM users WHERE id = $1 AND deletion_pending_at IS NOT NULL`,
+      [targetId]
+    );
+    if (delRows.length) return res.status(404).json({ error: 'User not found' });
+
     const friend = targetId === myId || await areFriends(myId, targetId);
     const visCondition = friend ? `p.visibility IN ('friends','public')` : `p.visibility = 'public'`;
 
@@ -190,6 +216,15 @@ router.get('/:id', async (req, res, next) => {
 
     if (!rows.length) return res.status(404).json({ error: 'Post not found' });
     const post = rows[0];
+
+    // Block check.
+    const { rows: blockRows } = await pool.query(
+      `SELECT 1 FROM blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2)
+          OR (blocker_id = $2 AND blocked_id = $1)`,
+      [myId, post.user_id]
+    );
+    if (blockRows.length) return res.status(404).json({ error: 'Post not found' });
 
     const canView = post.user_id === myId
       || post.visibility === 'public'
