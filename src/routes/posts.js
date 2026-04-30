@@ -121,16 +121,16 @@ router.get('/', async (req, res, next) => {
       // Hide posts by users who blocked me OR who I've blocked.
       `NOT EXISTS (
         SELECT 1 FROM blocks b
-        WHERE (b.blocker_id = $1 AND b.blocked_id = p.user_id)
-           OR (b.blocked_id = $1 AND b.blocker_id = p.user_id)
+        WHERE (b.blocker_id = $3 AND b.blocked_id = p.user_id)
+           OR (b.blocked_id = $3 AND b.blocker_id = p.user_id)
       )`,
       // Hide posts by users pending deletion.
       `NOT EXISTS (
         SELECT 1 FROM users u WHERE u.id = p.user_id AND u.deletion_pending_at IS NOT NULL
       )`,
     ];
-    const params = [before, visibleUserIds];
-    let pIdx = 3;
+    const params = [before, visibleUserIds, myId];
+    let pIdx = 4;
 
     if (latMin != null) {
       conditions.push(`p.lat BETWEEN $${pIdx} AND $${pIdx + 1}`);
