@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const app  = require('./app');
 const { reapDeletedUsers } = require('./jobs/reap_users');
+const { migrate } = require('./db/migrate');
 
 const PORT = process.env.PORT || 3000;
 
@@ -10,6 +11,14 @@ cron.schedule('0 3 * * *', () => {
   reapDeletedUsers();
 }, { timezone: 'UTC' });
 
-app.listen(PORT, () => {
-  console.log(`Grounders API running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
-});
+// Run idempotent schema migration before listening — safe to repeat.
+migrate()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Grounders API running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
+    });
+  })
+  .catch(err => {
+    console.error('[migrate] failed at boot:', err);
+    process.exit(1);
+  });

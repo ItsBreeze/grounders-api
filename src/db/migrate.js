@@ -228,13 +228,22 @@ async function migrate() {
     console.log('Running Grounders migration…');
     await client.query(SQL);
     console.log('Migration complete ✓');
-  } catch (err) {
-    console.error('Migration failed:', err.message);
-    process.exit(1);
   } finally {
     client.release();
-    await pool.end();
   }
 }
 
-migrate();
+// CLI mode: `node src/db/migrate.js` — close the pool when done.
+// Library mode (require'd by server.js): leave the pool open so the
+// app keeps using it after schema is up-to-date.
+if (require.main === module) {
+  migrate()
+    .then(() => pool.end())
+    .catch(err => {
+      console.error('Migration failed:', err.message);
+      pool.end();
+      process.exit(1);
+    });
+}
+
+module.exports = { migrate };
