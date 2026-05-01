@@ -118,6 +118,7 @@ router.get('/', async (req, res, next) => {
     const conditions = [
       `p.posted_at < $1`,
       `(p.user_id = ANY($2) OR p.visibility = 'public')`,
+      `p.archived_at IS NULL`,
       // Hide posts by users who blocked me OR who I've blocked.
       `NOT EXISTS (
         SELECT 1 FROM blocks b
@@ -191,13 +192,63 @@ router.get('/by-user/:userId', async (req, res, next) => {
       `SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
        FROM posts p JOIN users u ON u.id = p.user_id
        LEFT JOIN reactions r ON r.post_id = p.id
-       WHERE p.user_id = $1 AND ${visCondition} AND p.posted_at < $2
+       WHERE p.user_id = $1 AND ${visCondition}
+         AND p.posted_at < $2 AND p.archived_at IS NULL
        GROUP BY p.id, u.display_name
        ORDER BY p.posted_at DESC LIMIT $3`,
       [targetId, before, limit]
     );
 
     res.json(rows.map(formatPost));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Archive ─────────────────────────────────────────────────────────
+// Per-user soft-delete bin. Routes must be registered BEFORE `/:id` so
+// the literal `/archived` path doesn't get captured by the UUID slot.
+
+router.get('/archived', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
+       FROM posts p JOIN users u ON u.id = p.user_id
+       LEFT JOIN reactions r ON r.post_id = p.id
+       WHERE p.user_id = $1 AND p.archived_at IS NOT NULL
+       GROUP BY p.id, u.display_name
+       ORDER BY p.archived_at DESC`,
+      [req.user.id]
+    );
+    res.json(rows.map(formatPost));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/archive', async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE posts SET archived_at = NOW()
+       WHERE id = $1 AND user_id = $2 AND archived_at IS NULL`,
+      [req.params.id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Post not found or not yours' });
+    res.json({ archived: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/unarchive', async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE posts SET archived_at = NULL
+       WHERE id = $1 AND user_id = $2 AND archived_at IS NOT NULL`,
+      [req.params.id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Post not found or not archived' });
+    res.json({ unarchived: true });
   } catch (err) {
     next(err);
   }

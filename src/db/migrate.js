@@ -97,9 +97,15 @@ CREATE TABLE IF NOT EXISTS posts (
   CONSTRAINT audio_requires_title CHECK (type != 'audio' OR audio_title IS NOT NULL)
 );
 
+-- Soft-delete column for the per-user Archive — feed/profile queries
+-- exclude rows where this is non-null; the archive endpoint surfaces
+-- only those rows back to the owner.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_posts_user     ON posts(user_id, posted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_posted   ON posts(posted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_latng    ON posts(lat, lng);
+CREATE INDEX IF NOT EXISTS idx_posts_archived ON posts(user_id, archived_at) WHERE archived_at IS NOT NULL;
 
 
 -- ─── Reactions ─────────────────────────────────────────────────────────────
