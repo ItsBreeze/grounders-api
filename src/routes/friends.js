@@ -15,6 +15,35 @@ const notifications = require('../services/notifications');
 
 router.use(requireAuth);
 
+// Debug helper: seeds a pending inbound friend request to the caller
+// from any other existing user. Used to test the unread-tag badge
+// without needing a second device. Idempotent — picks the first other
+// user found and silently no-ops if a pending request already exists.
+router.post('/test-tag', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const { rows } = await pool.query(
+      `SELECT id FROM users
+       WHERE id != $1 AND deletion_pending_at IS NULL
+       ORDER BY created_at ASC LIMIT 1`,
+      [myId]
+    );
+    if (!rows.length) {
+      return res.status(400).json({ error: 'No other users to seed from' });
+    }
+    const fromUserId = rows[0].id;
+    await pool.query(
+      `INSERT INTO friend_requests (id, from_user_id, to_user_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (from_user_id, to_user_id) DO NOTHING`,
+      [uuid(), fromUserId, myId]
+    );
+    res.json({ ok: true, from_user_id: fromUserId });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const myId = req.user.id;
