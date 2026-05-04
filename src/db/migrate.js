@@ -212,6 +212,68 @@ CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_id);
 CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
 
 
+-- ─── Radio: per-user flags & storage usage ─────────────────────────────────
+-- radio_enabled flips true the first time a user signs in via grounders.radio.app.
+-- radio_storage_used_bytes is a running aggregate maintained by upload/delete
+-- routes; billing enforcement is deferred (free tier for now).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_storage_used_bytes BIGINT NOT NULL DEFAULT 0;
+
+
+-- ─── Radio: workspaces ─────────────────────────────────────────────────────
+-- A workspace is a group chronological feed of voice notes + files.
+-- The creator owns it and pays for the storage of files they upload.
+-- Storage is always charged to the uploader, not the workspace owner.
+CREATE TABLE IF NOT EXISTS radio_workspaces (
+  id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+  owner_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name          TEXT        NOT NULL DEFAULT '',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_workspaces_owner ON radio_workspaces(owner_id);
+
+
+-- ─── Radio: workspace members ──────────────────────────────────────────────
+-- The owner is also a member (inserted on workspace create). Members must
+-- be friends of the user who added them — enforced in the route layer.
+CREATE TABLE IF NOT EXISTS radio_workspace_members (
+  workspace_id  UUID        NOT NULL REFERENCES radio_workspaces(id) ON DELETE CASCADE,
+  user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  added_by      UUID        REFERENCES users(id) ON DELETE SET NULL,
+  joined_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_members_user ON radio_workspace_members(user_id);
+
+
+-- ─── Radio: files (voice notes + uploaded files) ───────────────────────────
+-- One row per uploaded artifact in a workspace. r2_key is the Cloudflare R2
+-- object key; size_bytes is captured at upload time and used to maintain
+-- users.radio_storage_used_bytes on insert/delete.
+DO $$ BEGIN
+  CREATE TYPE radio_file_kind AS ENUM ('voice_note', 'file');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS radio_files (
+  id            UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
+  workspace_id  UUID            NOT NULL REFERENCES radio_workspaces(id) ON DELETE CASCADE,
+  owner_id      UUID            NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind          radio_file_kind NOT NULL,
+  r2_key        TEXT            NOT NULL,
+  mime_type     TEXT,
+  filename      TEXT,
+  size_bytes    BIGINT          NOT NULL,
+  duration_ms   INTEGER,
+  created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_files_workspace ON radio_files(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
+
+
 -- ─── App Review backdoor user ──────────────────────────────────────────────
 -- Pre-seeded user for App Store / Play Console reviewers. The
 -- /auth/verify-otp shortcut uses APP_REVIEW_PHONE / APP_REVIEW_OTP env
