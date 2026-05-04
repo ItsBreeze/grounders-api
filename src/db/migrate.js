@@ -218,6 +218,10 @@ CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
 -- routes; billing enforcement is deferred (free tier for now).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_storage_used_bytes BIGINT NOT NULL DEFAULT 0;
+-- Per-user Radio dial layout (UI state).
+-- Shape: { tiles: [{ id, type: 'contact'|'workspace', ref_id, group_id?: string }], groups: [{ id, name, x?, y? }] }
+-- Schema is intentionally loose so the client can evolve layout without a migration.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_dial_state JSONB NOT NULL DEFAULT '{"tiles":[],"groups":[]}'::jsonb;
 
 
 -- ─── Radio: workspaces ─────────────────────────────────────────────────────

@@ -79,6 +79,98 @@ async function areFriends(userIdA, userIdB) {
 }
 
 
+// ─── Dial state (per-user UI layout) ────────────────────────────────────────
+
+// GET /radio/dial — my saved dial layout
+router.get('/dial', async (req, res, next) => {
+  try {
+    const { rows: [u] } = await pool.query(
+      `SELECT radio_dial_state AS state FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+    res.json(u?.state || { tiles: [], groups: [] });
+  } catch (err) { next(err); }
+});
+
+// PUT /radio/dial { tiles: [...], groups: [...] }
+router.put('/dial', async (req, res, next) => {
+  try {
+    const tiles = Array.isArray(req.body.tiles) ? req.body.tiles : [];
+    const groups = Array.isArray(req.body.groups) ? req.body.groups : [];
+    const state = { tiles, groups };
+    await pool.query(
+      `UPDATE users SET radio_dial_state = $1 WHERE id = $2`,
+      [JSON.stringify(state), req.user.id]
+    );
+    res.json(state);
+  } catch (err) { next(err); }
+});
+
+
+// ─── Search (contacts + workspaces + files) ─────────────────────────────────
+
+// GET /radio/search?q=...&limit=10
+// Returns three grouped lists, scoped to:
+//   - friends (contacts): match display_name
+//   - workspaces I'm a member of: match name
+//   - files inside those workspaces: match filename
+router.get('/search', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const q = (req.query.q || '').toString().trim();
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    if (!q) return res.json({ contacts: [], workspaces: [], files: [] });
+    const like = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
+
+    const [contactsR, workspacesR, filesR] = await Promise.all([
+      pool.query(
+        `SELECT u.id, u.display_name
+           FROM friendships f
+           JOIN users u
+             ON u.id = CASE WHEN f.user_id_a = $1 THEN f.user_id_b ELSE f.user_id_a END
+          WHERE (f.user_id_a = $1 OR f.user_id_b = $1)
+            AND u.display_name ILIKE $2 ESCAPE '\\'
+          ORDER BY u.display_name
+          LIMIT $3`,
+        [myId, like, limit]
+      ),
+      pool.query(
+        `SELECT w.id, w.name, w.owner_id,
+                (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count
+           FROM radio_workspaces w
+           JOIN radio_workspace_members me ON me.workspace_id = w.id
+          WHERE me.user_id = $1
+            AND w.name ILIKE $2 ESCAPE '\\'
+          ORDER BY w.created_at DESC
+          LIMIT $3`,
+        [myId, like, limit]
+      ),
+      pool.query(
+        `SELECT f.id, f.workspace_id, f.kind, f.filename, f.mime_type, f.size_bytes,
+                f.duration_ms, f.created_at, f.r2_key,
+                w.name AS workspace_name
+           FROM radio_files f
+           JOIN radio_workspaces w ON w.id = f.workspace_id
+           JOIN radio_workspace_members me ON me.workspace_id = f.workspace_id
+          WHERE me.user_id = $1
+            AND f.filename IS NOT NULL
+            AND f.filename ILIKE $2 ESCAPE '\\'
+          ORDER BY f.created_at DESC
+          LIMIT $3`,
+        [myId, like, limit]
+      ),
+    ]);
+
+    const base = process.env.R2_PUBLIC_URL;
+    res.json({
+      contacts: contactsR.rows,
+      workspaces: workspacesR.rows,
+      files: filesR.rows.map(r => ({ ...r, url: `${base}/${r.r2_key}` })),
+    });
+  } catch (err) { next(err); }
+});
+
+
 // ─── Workspaces ─────────────────────────────────────────────────────────────
 
 // GET /radio/workspaces — workspaces I'm a member of
@@ -155,6 +247,31 @@ router.post('/workspaces', async (req, res, next) => {
   } finally {
     client.release();
   }
+});
+
+// GET /radio/workspaces/dm?user_id=X
+// Returns the existing 1:1 workspace I share with X (exactly two members, both of us), or 404.
+// Caller can fall back to POST /radio/workspaces to create one.
+router.get('/workspaces/dm', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const otherId = req.query.user_id;
+    if (!otherId) return res.status(400).json({ error: 'user_id required' });
+    if (otherId === myId) return res.status(400).json({ error: 'Cannot DM yourself' });
+
+    const { rows } = await pool.query(
+      `SELECT w.id, w.name, w.owner_id, w.created_at
+         FROM radio_workspaces w
+         JOIN radio_workspace_members ma ON ma.workspace_id = w.id AND ma.user_id = $1
+         JOIN radio_workspace_members mb ON mb.workspace_id = w.id AND mb.user_id = $2
+        WHERE (SELECT COUNT(*) FROM radio_workspace_members m WHERE m.workspace_id = w.id) = 2
+        ORDER BY w.created_at DESC
+        LIMIT 1`,
+      [myId, otherId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'No DM workspace found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
 });
 
 // GET /radio/workspaces/:id — workspace + members
