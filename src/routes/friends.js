@@ -73,10 +73,15 @@ router.post('/requests', async (req, res, next) => {
     if (!toUserId && (req.body.phone || req.body.email)) {
       const col = req.body.phone ? 'phone' : 'email';
       const val = req.body.phone || req.body.email;
-      const { rows } = await pool.query(
-        `SELECT id FROM users WHERE ${col} = $1`,
-        [val]
-      );
+      // Phone lookups normalise to digits on both sides so "+17809011054",
+      // "17809011054", "1-780-901-1054" etc. all resolve to the same row.
+      // Email keeps an exact match (case-sensitive — fine for now).
+      const sql = col === 'phone'
+        ? `SELECT id FROM users
+           WHERE regexp_replace(phone, '\\D', '', 'g')
+               = regexp_replace($1, '\\D', '', 'g')`
+        : `SELECT id FROM users WHERE email = $1`;
+      const { rows } = await pool.query(sql, [val]);
       if (!rows.length) return res.status(404).json({ error: 'User not found' });
       toUserId = rows[0].id;
     }
