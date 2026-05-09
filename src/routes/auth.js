@@ -51,12 +51,12 @@ async function storeRefreshToken(userId, token) {
   }
 }
 
-async function sendSms(phone, code) {
+async function sendSms(phone, code, brand = 'Grounders') {
   if (!twilioClient) return;
   await twilioClient.messages.create({
     to: phone,
     from: process.env.TWILIO_PHONE_NUMBER,
-    body: `${code} is your Grounders code.`,
+    body: `${code} is your ${brand} code.`,
   });
 }
 
@@ -73,9 +73,13 @@ function sanitizeUser(u) {
 
 router.post('/request-otp', async (req, res, next) => {
   try {
-    const { phone, email } = req.body;
+    const { phone, email, client } = req.body;
     if (!phone && !email) return res.status(400).json({ error: 'Provide phone or email' });
     if (phone && email) return res.status(400).json({ error: 'Provide only one of phone or email' });
+
+    // Brand the SMS body based on which front-end requested the OTP.
+    // Defaults to 'Grounders' so existing clients keep their current text.
+    const brand = client === 'radio' ? 'Radio' : 'Grounders';
 
     // Reviewer phone — pretend success without sending SMS or storing OTP.
     if (phone && process.env.APP_REVIEW_PHONE && phone === process.env.APP_REVIEW_PHONE) {
@@ -94,7 +98,7 @@ router.post('/request-otp', async (req, res, next) => {
       [uuid(), target, hash, expiresAt]
     );
 
-    if (type === 'phone') await sendSms(target, code);
+    if (type === 'phone') await sendSms(target, code, brand);
 
     const body = { message: 'OTP sent' };
     if (!twilioClient) body._dev_otp = code;
