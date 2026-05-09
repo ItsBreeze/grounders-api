@@ -451,7 +451,7 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT f.id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
-              f.size_bytes, f.duration_ms, f.created_at,
+              f.size_bytes, f.duration_ms, f.text_content, f.created_at,
               u.display_name AS owner_name
          FROM radio_files f
          JOIN users u ON u.id = f.owner_id
@@ -462,7 +462,10 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
     );
 
     const base = process.env.R2_PUBLIC_URL;
-    res.json(rows.map(r => ({ ...r, url: `${base}/${r.r2_key}` })));
+    res.json(rows.map(r => ({
+      ...r,
+      url: r.r2_key ? `${base}/${r.r2_key}` : null,
+    })));
   } catch (err) { next(err); }
 });
 
@@ -583,6 +586,60 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
   }
 });
 
+// POST /radio/workspaces/:id/text { content }
+// Posts a text message into the workspace feed. Sized 0 (no R2 object).
+router.post('/workspaces/:id/text', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const wsId = req.params.id;
+    if (!(await isMember(wsId, myId))) return res.status(403).json({ error: 'Not a member' });
+
+    const content = (req.body.content || '').toString().trim();
+    if (!content) return res.status(400).json({ error: 'content required' });
+    if (content.length > 5000) return res.status(400).json({ error: 'content too long (max 5000 chars)' });
+
+    const fileId = uuid();
+    const { rows: [row] } = await pool.query(
+      `INSERT INTO radio_files
+         (id, workspace_id, owner_id, kind, text_content, size_bytes)
+       VALUES ($1, $2, $3, 'text', $4, 0)
+       RETURNING *`,
+      [fileId, wsId, myId, content]
+    );
+
+    notifications.fireAndForget((async () => {
+      const { rows: [sender] } = await pool.query(
+        `SELECT display_name FROM users WHERE id = $1`, [myId]
+      );
+      const { rows: [ws] } = await pool.query(
+        `SELECT name FROM radio_workspaces WHERE id = $1`, [wsId]
+      );
+      const { rows: members } = await pool.query(
+        `SELECT user_id FROM radio_workspace_members WHERE workspace_id = $1 AND user_id != $2`,
+        [wsId, myId]
+      );
+      const recipientIds = members.map(m => m.user_id);
+      if (!recipientIds.length) return;
+
+      const senderName = sender?.display_name?.trim() || 'Someone';
+      const wsName = ws?.name?.trim() || 'workspace';
+      const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content;
+      return notifications.sendToUsers(recipientIds, {
+        title: `${senderName} (${wsName})`,
+        body:  preview,
+        data:  {
+          type: 'radio_text',
+          workspace_id: wsId,
+          file_id: row.id,
+          from_user_id: myId,
+        },
+      });
+    })());
+
+    res.status(201).json(row);
+  } catch (err) { next(err); }
+});
+
 // DELETE /radio/files/:id — owner of the file only. Refunds storage + deletes from R2.
 router.delete('/files/:id', async (req, res, next) => {
   const client = await pool.connect();
@@ -601,14 +658,16 @@ router.delete('/files/:id', async (req, res, next) => {
     const f = rows[0];
     await client.query(
       `UPDATE users SET radio_storage_used_bytes = GREATEST(0, radio_storage_used_bytes - $1) WHERE id = $2`,
-      [Number(f.size_bytes), myId]
+      [Number(f.size_bytes || 0), myId]
     );
     await client.query('COMMIT');
 
-    r2().send(new DeleteObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: f.r2_key,
-    })).catch(() => {});
+    if (f.r2_key) {
+      r2().send(new DeleteObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: f.r2_key,
+      })).catch(() => {});
+    }
 
     res.json({ deleted: true });
   } catch (err) {

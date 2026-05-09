@@ -261,6 +261,11 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- Allow 'text' as a third kind so the chronological feed can carry typed
+-- messages alongside voice notes and files. Older deployments need the
+-- value added to the existing enum; new deployments bake it in below.
+ALTER TYPE radio_file_kind ADD VALUE IF NOT EXISTS 'text';
+
 CREATE TABLE IF NOT EXISTS radio_files (
   id            UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
   workspace_id  UUID            NOT NULL REFERENCES radio_workspaces(id) ON DELETE CASCADE,
@@ -273,6 +278,13 @@ CREATE TABLE IF NOT EXISTS radio_files (
   duration_ms   INTEGER,
   created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
+
+-- Text messages reuse this table but don't have an R2 object — relax the
+-- NOT NULL constraints and add a text column. Route layer enforces the
+-- "text rows have text_content; voice/file rows have r2_key" invariant.
+ALTER TABLE radio_files ALTER COLUMN r2_key      DROP NOT NULL;
+ALTER TABLE radio_files ALTER COLUMN size_bytes  DROP NOT NULL;
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS text_content TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_radio_files_workspace ON radio_files(workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
