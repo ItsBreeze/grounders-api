@@ -173,14 +173,24 @@ router.get('/search', async (req, res, next) => {
 
 // ─── Workspaces ─────────────────────────────────────────────────────────────
 
-// GET /radio/workspaces — workspaces I'm a member of
+// GET /radio/workspaces — workspaces I'm a member of, with member list embedded
+// so the client can collapse 1:1 workspaces into a single contact tile.
 router.get('/workspaces', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const { rows } = await pool.query(
       `SELECT w.id, w.name, w.owner_id, w.created_at,
               (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count,
-              (SELECT MAX(created_at) FROM radio_files f WHERE f.workspace_id = w.id) AS last_activity_at
+              (SELECT MAX(created_at) FROM radio_files f WHERE f.workspace_id = w.id) AS last_activity_at,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'user_id', mm.user_id,
+                  'display_name', uu.display_name
+                ) ORDER BY uu.display_name)
+                FROM radio_workspace_members mm
+                JOIN users uu ON uu.id = mm.user_id
+                WHERE mm.workspace_id = w.id
+              ), '[]'::json) AS members
          FROM radio_workspaces w
          JOIN radio_workspace_members m ON m.workspace_id = w.id
         WHERE m.user_id = $1
