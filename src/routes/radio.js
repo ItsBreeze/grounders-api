@@ -482,8 +482,14 @@ router.post('/workspaces/:id/upload-url', async (req, res, next) => {
 
     let mime, ext;
     if (kind === 'voice_note') {
-      mime = VOICE_MIME;
-      ext = VOICE_EXT;
+      // Honor client-passed mime so web (audio/webm Opus) and mobile
+      // (audio/mp4 AAC) recordings each land in R2 with the right
+      // Content-Type — otherwise playback breaks in the browser.
+      const clientMime = (req.body.mime_type || '').toString();
+      if (clientMime === 'audio/webm') { mime = 'audio/webm'; ext = 'webm'; }
+      else if (clientMime === 'audio/ogg') { mime = 'audio/ogg'; ext = 'ogg'; }
+      else if (clientMime === 'audio/wav') { mime = 'audio/wav'; ext = 'wav'; }
+      else { mime = VOICE_MIME; ext = VOICE_EXT; }
     } else {
       mime = (req.body.mime_type || 'application/octet-stream').toString();
       const fn = (req.body.filename || '').toString();
