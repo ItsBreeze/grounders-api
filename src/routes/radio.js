@@ -179,7 +179,7 @@ router.get('/workspaces', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const { rows } = await pool.query(
-      `SELECT w.id, w.name, w.owner_id, w.created_at,
+      `SELECT w.id, w.name, w.color, w.owner_id, w.created_at,
               (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count,
               (SELECT MAX(created_at) FROM radio_files f WHERE f.workspace_id = w.id) AS last_activity_at,
               COALESCE((
@@ -208,6 +208,9 @@ router.post('/workspaces', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const name = (req.body.name || '').toString().slice(0, 100);
+    const rawColor = (req.body.color || '').toString().trim();
+    // Accept hex like "#1E88E5" — case-insensitive, no surrounding whitespace.
+    const color = /^#[0-9a-fA-F]{6}$/.test(rawColor) ? rawColor.toUpperCase() : null;
     const memberIds = Array.isArray(req.body.member_ids) ? req.body.member_ids : [];
 
     for (const mid of memberIds) {
@@ -220,8 +223,8 @@ router.post('/workspaces', async (req, res, next) => {
     await client.query('BEGIN');
     const wsId = uuid();
     await client.query(
-      `INSERT INTO radio_workspaces (id, owner_id, name) VALUES ($1, $2, $3)`,
-      [wsId, myId, name]
+      `INSERT INTO radio_workspaces (id, owner_id, name, color) VALUES ($1, $2, $3, $4)`,
+      [wsId, myId, name, color]
     );
 
     const allMembers = Array.from(new Set([myId, ...memberIds]));
@@ -250,7 +253,7 @@ router.post('/workspaces', async (req, res, next) => {
       })());
     }
 
-    res.status(201).json({ id: wsId, owner_id: myId, name, member_ids: allMembers });
+    res.status(201).json({ id: wsId, owner_id: myId, name, color, member_ids: allMembers });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     next(err);
@@ -270,7 +273,7 @@ router.get('/workspaces/dm', async (req, res, next) => {
     if (otherId === myId) return res.status(400).json({ error: 'Cannot DM yourself' });
 
     const { rows } = await pool.query(
-      `SELECT w.id, w.name, w.owner_id, w.created_at
+      `SELECT w.id, w.name, w.color, w.owner_id, w.created_at
          FROM radio_workspaces w
          JOIN radio_workspace_members ma ON ma.workspace_id = w.id AND ma.user_id = $1
          JOIN radio_workspace_members mb ON mb.workspace_id = w.id AND mb.user_id = $2
@@ -292,7 +295,7 @@ router.get('/workspaces/:id', async (req, res, next) => {
     if (!(await isMember(wsId, myId))) return res.status(404).json({ error: 'Workspace not found' });
 
     const { rows: [ws] } = await pool.query(
-      `SELECT id, owner_id, name, created_at FROM radio_workspaces WHERE id = $1`,
+      `SELECT id, owner_id, name, color, created_at FROM radio_workspaces WHERE id = $1`,
       [wsId]
     );
     const { rows: members } = await pool.query(
@@ -307,16 +310,36 @@ router.get('/workspaces/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /radio/workspaces/:id { name } — owner only
+// PATCH /radio/workspaces/:id { name?, color? } — owner only
 router.patch('/workspaces/:id', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const wsId = req.params.id;
     if (!(await isOwner(wsId, myId))) return res.status(403).json({ error: 'Owner only' });
 
-    const name = (req.body.name || '').toString().slice(0, 100);
-    await pool.query(`UPDATE radio_workspaces SET name = $1 WHERE id = $2`, [name, wsId]);
-    res.json({ id: wsId, name });
+    const updates = [];
+    const params = [];
+    if ('name' in req.body) {
+      params.push((req.body.name || '').toString().slice(0, 100));
+      updates.push(`name = $${params.length}`);
+    }
+    if ('color' in req.body) {
+      const raw = (req.body.color || '').toString().trim();
+      const color = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toUpperCase() : null;
+      params.push(color);
+      updates.push(`color = $${params.length}`);
+    }
+    if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
+    params.push(wsId);
+    await pool.query(
+      `UPDATE radio_workspaces SET ${updates.join(', ')} WHERE id = $${params.length}`,
+      params
+    );
+    const { rows: [row] } = await pool.query(
+      `SELECT id, name, color FROM radio_workspaces WHERE id = $1`,
+      [wsId]
+    );
+    res.json(row);
   } catch (err) { next(err); }
 });
 

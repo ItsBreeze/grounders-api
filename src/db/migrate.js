@@ -237,6 +237,10 @@ CREATE TABLE IF NOT EXISTS radio_workspaces (
 
 CREATE INDEX IF NOT EXISTS idx_radio_workspaces_owner ON radio_workspaces(owner_id);
 
+-- Optional hex color (e.g. "#1E88E5") for group workspaces. Surface in the
+-- dial so users can visually distinguish their groups.
+ALTER TABLE radio_workspaces ADD COLUMN IF NOT EXISTS color TEXT;
+
 
 -- ─── Radio: workspace members ──────────────────────────────────────────────
 -- The owner is also a member (inserted on workspace create). Members must
