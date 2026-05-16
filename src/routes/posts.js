@@ -144,12 +144,10 @@ router.get('/', async (req, res, next) => {
     else if (visFilter === 'public') conditions.push(`p.visibility = 'public'`);
 
     const sql = `
-      SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
+      SELECT p.*, u.display_name
       FROM posts p
       JOIN users u ON u.id = p.user_id
-      LEFT JOIN reactions r ON r.post_id = p.id
       WHERE ${conditions.join(' AND ')}
-      GROUP BY p.id, u.display_name
       ORDER BY p.posted_at DESC
       LIMIT $${pIdx}
     `;
@@ -189,12 +187,10 @@ router.get('/by-user/:userId', async (req, res, next) => {
     const visCondition = friend ? `p.visibility IN ('friends','public')` : `p.visibility = 'public'`;
 
     const { rows } = await pool.query(
-      `SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
+      `SELECT p.*, u.display_name
        FROM posts p JOIN users u ON u.id = p.user_id
-       LEFT JOIN reactions r ON r.post_id = p.id
        WHERE p.user_id = $1 AND ${visCondition}
          AND p.posted_at < $2 AND p.archived_at IS NULL
-       GROUP BY p.id, u.display_name
        ORDER BY p.posted_at DESC LIMIT $3`,
       [targetId, before, limit]
     );
@@ -212,11 +208,9 @@ router.get('/by-user/:userId', async (req, res, next) => {
 router.get('/archived', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
+      `SELECT p.*, u.display_name
        FROM posts p JOIN users u ON u.id = p.user_id
-       LEFT JOIN reactions r ON r.post_id = p.id
        WHERE p.user_id = $1 AND p.archived_at IS NOT NULL
-       GROUP BY p.id, u.display_name
        ORDER BY p.archived_at DESC`,
       [req.user.id]
     );
@@ -258,10 +252,9 @@ router.get('/:id', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const { rows } = await pool.query(
-      `SELECT p.*, u.display_name, COUNT(r.user_id) AS reaction_count
+      `SELECT p.*, u.display_name
        FROM posts p JOIN users u ON u.id = p.user_id
-       LEFT JOIN reactions r ON r.post_id = p.id
-       WHERE p.id = $1 GROUP BY p.id, u.display_name`,
+       WHERE p.id = $1`,
       [req.params.id]
     );
 

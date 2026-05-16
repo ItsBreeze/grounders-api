@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS posts (
 -- only those rows back to the owner.
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
+-- Denormalized counter maintained by reactions triggers below. Keeps
+-- the per-pin payload free of a LEFT JOIN + GROUP BY that the map
+-- viewport fetch hits on every camera-idle.
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS reaction_count INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_posts_user     ON posts(user_id, posted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_posted   ON posts(posted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_latng    ON posts(lat, lng);
@@ -118,6 +123,35 @@ CREATE TABLE IF NOT EXISTS reactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reactions_post ON reactions(post_id);
+
+-- Keep posts.reaction_count in sync. Emoji-change UPDATEs are
+-- intentionally ignored — only genuine new reactions and removals
+-- shift the count.
+CREATE OR REPLACE FUNCTION posts_reaction_count_sync() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    UPDATE posts SET reaction_count = reaction_count + 1 WHERE id = NEW.post_id;
+  ELSIF TG_OP = 'DELETE' THEN
+    UPDATE posts SET reaction_count = GREATEST(reaction_count - 1, 0) WHERE id = OLD.post_id;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS reactions_count_trg ON reactions;
+CREATE TRIGGER reactions_count_trg
+  AFTER INSERT OR DELETE ON reactions
+  FOR EACH ROW EXECUTE FUNCTION posts_reaction_count_sync();
+
+-- One-shot backfill for existing rows; no-op once the trigger has
+-- been the only writer (the WHERE guards against repeated drift on
+-- every migration run).
+UPDATE posts p
+SET reaction_count = sub.cnt
+FROM (
+  SELECT post_id, COUNT(*)::int AS cnt FROM reactions GROUP BY post_id
+) sub
+WHERE p.id = sub.post_id AND p.reaction_count <> sub.cnt;
 
 
 -- ─── Friendships ───────────────────────────────────────────────────────────
