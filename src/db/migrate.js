@@ -324,6 +324,11 @@ ALTER TABLE radio_files ALTER COLUMN r2_key      DROP NOT NULL;
 ALTER TABLE radio_files ALTER COLUMN size_bytes  DROP NOT NULL;
 ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS text_content TEXT;
 
+-- Per-item manual ordering. When set, the client renders the item at this
+-- position instead of its chronological place. Time-pill turns red on the
+-- frontend whenever the displayed position diverges from created_at order.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS manual_order DOUBLE PRECISION;
+
 CREATE INDEX IF NOT EXISTS idx_radio_files_workspace ON radio_files(workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
 

@@ -474,7 +474,8 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
 
     const { rows } = await pool.query(
       `SELECT f.id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
-              f.size_bytes, f.duration_ms, f.text_content, f.created_at,
+              f.size_bytes, f.duration_ms, f.text_content, f.manual_order,
+              f.created_at,
               u.display_name AS owner_name
          FROM radio_files f
          JOIN users u ON u.id = f.owner_id
@@ -666,6 +667,40 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
     })());
 
     res.status(201).json(row);
+  } catch (err) { next(err); }
+});
+
+// PATCH /radio/files/:id { manual_order } — any workspace member can reorder.
+// `manual_order` is a DOUBLE: items render sorted DESC by COALESCE(manual_order,
+// created_at_epoch_ms). Pass null to clear the manual position.
+router.patch('/files/:id', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const fileId = req.params.id;
+
+    const { rows: [f] } = await pool.query(
+      `SELECT workspace_id FROM radio_files WHERE id = $1`,
+      [fileId]
+    );
+    if (!f) return res.status(404).json({ error: 'File not found' });
+    if (!(await isMember(f.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+
+    if (!('manual_order' in req.body)) {
+      return res.status(400).json({ error: 'manual_order required' });
+    }
+    const raw = req.body.manual_order;
+    const nextOrder = raw === null ? null : Number(raw);
+    if (nextOrder !== null && !Number.isFinite(nextOrder)) {
+      return res.status(400).json({ error: 'manual_order must be a number or null' });
+    }
+
+    await pool.query(
+      `UPDATE radio_files SET manual_order = $1 WHERE id = $2`,
+      [nextOrder, fileId]
+    );
+    res.json({ id: fileId, manual_order: nextOrder });
   } catch (err) { next(err); }
 });
 
