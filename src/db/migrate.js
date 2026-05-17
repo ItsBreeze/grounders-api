@@ -329,8 +329,30 @@ ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS text_content TEXT;
 -- frontend whenever the displayed position diverges from created_at order.
 ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS manual_order DOUBLE PRECISION;
 
+-- Optional grouping inside a workspace. Mirrors the dial-screen group model:
+-- nestable via parent_id, draggable as a unit via manual_order.
+CREATE TABLE IF NOT EXISTS radio_message_groups (
+  id            UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),
+  workspace_id  UUID            NOT NULL REFERENCES radio_workspaces(id) ON DELETE CASCADE,
+  parent_id     UUID            REFERENCES radio_message_groups(id) ON DELETE CASCADE,
+  name          TEXT            NOT NULL DEFAULT '',
+  color         TEXT,
+  manual_order  DOUBLE PRECISION,
+  created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_msg_groups_ws ON radio_message_groups(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_radio_msg_groups_parent ON radio_message_groups(parent_id);
+
+-- Each file/message can belong to one group. Deleting a group sets this null
+-- (ungroups its members) rather than deleting the file — the route layer
+-- handles "delete group + files" explicitly when requested.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS group_id UUID
+  REFERENCES radio_message_groups(id) ON DELETE SET NULL;
+
 CREATE INDEX IF NOT EXISTS idx_radio_files_workspace ON radio_files(workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
+CREATE INDEX IF NOT EXISTS idx_radio_files_group     ON radio_files(group_id);
 
 
 -- ─── App Review backdoor user ──────────────────────────────────────────────

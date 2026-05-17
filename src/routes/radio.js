@@ -475,7 +475,7 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT f.id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
               f.size_bytes, f.duration_ms, f.text_content, f.manual_order,
-              f.created_at,
+              f.group_id, f.created_at,
               u.display_name AS owner_name
          FROM radio_files f
          JOIN users u ON u.id = f.owner_id
@@ -670,9 +670,10 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /radio/files/:id { manual_order } — any workspace member can reorder.
+// PATCH /radio/files/:id { manual_order?, group_id? } — any workspace member.
 // `manual_order` is a DOUBLE: items render sorted DESC by COALESCE(manual_order,
-// created_at_epoch_ms). Pass null to clear the manual position.
+// created_at_epoch_ms). `group_id` is a uuid (or null to ungroup). Pass either
+// field; missing fields are left untouched.
 router.patch('/files/:id', async (req, res, next) => {
   try {
     const myId = req.user.id;
@@ -687,21 +688,234 @@ router.patch('/files/:id', async (req, res, next) => {
       return res.status(403).json({ error: 'Not a member' });
     }
 
-    if (!('manual_order' in req.body)) {
-      return res.status(400).json({ error: 'manual_order required' });
+    const sets = [];
+    const params = [];
+    if ('manual_order' in req.body) {
+      const raw = req.body.manual_order;
+      const v = raw === null ? null : Number(raw);
+      if (v !== null && !Number.isFinite(v)) {
+        return res.status(400).json({ error: 'manual_order must be a number or null' });
+      }
+      params.push(v);
+      sets.push(`manual_order = $${params.length}`);
     }
-    const raw = req.body.manual_order;
-    const nextOrder = raw === null ? null : Number(raw);
-    if (nextOrder !== null && !Number.isFinite(nextOrder)) {
-      return res.status(400).json({ error: 'manual_order must be a number or null' });
+    if ('group_id' in req.body) {
+      const v = req.body.group_id;
+      if (v !== null) {
+        const { rows: [g] } = await pool.query(
+          `SELECT workspace_id FROM radio_message_groups WHERE id = $1`,
+          [v]
+        );
+        if (!g || g.workspace_id !== f.workspace_id) {
+          return res.status(400).json({ error: 'group_id must belong to this workspace' });
+        }
+      }
+      params.push(v);
+      sets.push(`group_id = $${params.length}`);
+    }
+    if (!sets.length) {
+      return res.status(400).json({ error: 'manual_order or group_id required' });
     }
 
+    params.push(fileId);
     await pool.query(
-      `UPDATE radio_files SET manual_order = $1 WHERE id = $2`,
-      [nextOrder, fileId]
+      `UPDATE radio_files SET ${sets.join(', ')} WHERE id = $${params.length}`,
+      params
     );
-    res.json({ id: fileId, manual_order: nextOrder });
+    res.json({ id: fileId });
   } catch (err) { next(err); }
+});
+
+// ─── Radio: message groups ─────────────────────────────────────────────────
+
+// GET /radio/workspaces/:id/message_groups — list groups in this workspace.
+router.get('/workspaces/:id/message_groups', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const wsId = req.params.id;
+    if (!(await isMember(wsId, myId))) {
+      return res.status(404).json({ error: 'Workspace not found' });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, parent_id, name, color, manual_order, created_at
+         FROM radio_message_groups
+        WHERE workspace_id = $1
+        ORDER BY created_at ASC`,
+      [wsId]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// POST /radio/workspaces/:id/message_groups { name, color?, parent_id? }
+router.post('/workspaces/:id/message_groups', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const wsId = req.params.id;
+    if (!(await isMember(wsId, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+    const name = (req.body.name || '').toString().trim();
+    if (!name) return res.status(400).json({ error: 'name required' });
+
+    const rawColor = (req.body.color || '').toString().trim();
+    const color = /^#[0-9a-fA-F]{6}$/.test(rawColor) ? rawColor.toUpperCase() : null;
+    const parentId = req.body.parent_id || null;
+    if (parentId) {
+      const { rows: [p] } = await pool.query(
+        `SELECT workspace_id FROM radio_message_groups WHERE id = $1`,
+        [parentId]
+      );
+      if (!p || p.workspace_id !== wsId) {
+        return res.status(400).json({ error: 'parent_id must belong to this workspace' });
+      }
+    }
+    const { rows: [g] } = await pool.query(
+      `INSERT INTO radio_message_groups (workspace_id, parent_id, name, color)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, parent_id, name, color, manual_order, created_at`,
+      [wsId, parentId, name, color]
+    );
+    res.status(201).json(g);
+  } catch (err) { next(err); }
+});
+
+// PATCH /radio/message_groups/:id { name?, color?, parent_id?, manual_order? }
+router.patch('/message_groups/:id', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const gid = req.params.id;
+    const { rows: [g] } = await pool.query(
+      `SELECT workspace_id FROM radio_message_groups WHERE id = $1`,
+      [gid]
+    );
+    if (!g) return res.status(404).json({ error: 'Group not found' });
+    if (!(await isMember(g.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+    const sets = [], params = [];
+    if ('name' in req.body) {
+      const v = (req.body.name || '').toString().trim();
+      if (!v) return res.status(400).json({ error: 'name cannot be empty' });
+      params.push(v); sets.push(`name = $${params.length}`);
+    }
+    if ('color' in req.body) {
+      const raw = (req.body.color || '').toString().trim();
+      const v = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toUpperCase() : null;
+      params.push(v); sets.push(`color = $${params.length}`);
+    }
+    if ('parent_id' in req.body) {
+      const v = req.body.parent_id || null;
+      if (v !== null) {
+        if (v === gid) return res.status(400).json({ error: 'parent_id cannot be self' });
+        const { rows: [p] } = await pool.query(
+          `SELECT workspace_id FROM radio_message_groups WHERE id = $1`,
+          [v]
+        );
+        if (!p || p.workspace_id !== g.workspace_id) {
+          return res.status(400).json({ error: 'parent_id must belong to this workspace' });
+        }
+        // Reject cycles: walk parent chain from candidate and bail if we hit gid.
+        let cur = v;
+        for (let i = 0; i < 32 && cur; i++) {
+          const { rows: [row] } = await pool.query(
+            `SELECT parent_id FROM radio_message_groups WHERE id = $1`,
+            [cur]
+          );
+          if (!row) break;
+          if (row.parent_id === gid) {
+            return res.status(400).json({ error: 'cycle: cannot nest under own descendant' });
+          }
+          cur = row.parent_id;
+        }
+      }
+      params.push(v); sets.push(`parent_id = $${params.length}`);
+    }
+    if ('manual_order' in req.body) {
+      const raw = req.body.manual_order;
+      const v = raw === null ? null : Number(raw);
+      if (v !== null && !Number.isFinite(v)) {
+        return res.status(400).json({ error: 'manual_order must be a number or null' });
+      }
+      params.push(v); sets.push(`manual_order = $${params.length}`);
+    }
+    if (!sets.length) return res.status(400).json({ error: 'no fields to update' });
+    params.push(gid);
+    await pool.query(
+      `UPDATE radio_message_groups SET ${sets.join(', ')} WHERE id = $${params.length}`,
+      params
+    );
+    res.json({ id: gid });
+  } catch (err) { next(err); }
+});
+
+// DELETE /radio/message_groups/:id?cascade=true — `cascade=true` also deletes
+// the files inside (and refunds storage). Default ungroups files and removes
+// the group only.
+router.delete('/message_groups/:id', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const myId = req.user.id;
+    const gid = req.params.id;
+    const cascade = req.query.cascade === 'true';
+
+    const { rows: [g] } = await client.query(
+      `SELECT workspace_id FROM radio_message_groups WHERE id = $1`,
+      [gid]
+    );
+    if (!g) return res.status(404).json({ error: 'Group not found' });
+    if (!(await isMember(g.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+
+    await client.query('BEGIN');
+    let deletedKeys = [];
+    if (cascade) {
+      // Collect descendant group ids first.
+      const groupIds = new Set([gid]);
+      let frontier = [gid];
+      for (let depth = 0; depth < 32 && frontier.length; depth++) {
+        const { rows } = await client.query(
+          `SELECT id FROM radio_message_groups WHERE parent_id = ANY($1::uuid[])`,
+          [frontier]
+        );
+        frontier = rows.map(r => r.id).filter(id => !groupIds.has(id));
+        frontier.forEach(id => groupIds.add(id));
+      }
+      const allIds = Array.from(groupIds);
+      // Delete files in those groups, refunding storage to each owner.
+      const { rows: files } = await client.query(
+        `DELETE FROM radio_files
+          WHERE group_id = ANY($1::uuid[])
+          RETURNING owner_id, r2_key, size_bytes`,
+        [allIds]
+      );
+      for (const f of files) {
+        if (f.r2_key) deletedKeys.push(f.r2_key);
+        if (Number(f.size_bytes || 0) > 0) {
+          await client.query(
+            `UPDATE users SET radio_storage_used_bytes = GREATEST(0, radio_storage_used_bytes - $1) WHERE id = $2`,
+            [Number(f.size_bytes), f.owner_id]
+          );
+        }
+      }
+    }
+    await client.query(`DELETE FROM radio_message_groups WHERE id = $1`, [gid]);
+    await client.query('COMMIT');
+
+    for (const key of deletedKeys) {
+      r2().send(new DeleteObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: key,
+      })).catch(() => {});
+    }
+    res.json({ deleted: true });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // DELETE /radio/files/:id — owner of the file only. Refunds storage + deletes from R2.
