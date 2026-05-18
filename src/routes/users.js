@@ -5,6 +5,28 @@ const { canonicalPair } = require('../utils/friends');
 
 router.use(requireAuth);
 
+// GET /users/lookup?phone=+17801234567
+// Resolve a phone number to a user. Matches by digits only so "+1 780 …",
+// "17801234567", etc. all map to the same row. 404 when no account exists
+// (client can then offer to send an SMS invite).
+router.get('/lookup', async (req, res, next) => {
+  try {
+    const phoneRaw = (req.query.phone || '').toString();
+    const digits = phoneRaw.replace(/\D/g, '');
+    if (digits.length < 10) return res.status(400).json({ error: 'Invalid phone' });
+    const { rows } = await pool.query(
+      `SELECT id, display_name, phone
+         FROM users
+        WHERE regexp_replace(phone, '\\D', '', 'g')
+            = regexp_replace($1, '\\D', '', 'g')
+        LIMIT 1`,
+      [digits]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    res.json(rows[0]);
+  } catch (err) { next(err); }
+});
+
 router.get('/me', async (req, res, next) => {
   try {
     const { rows } = await pool.query(

@@ -16,6 +16,7 @@ const deviceRoutes   = require('./routes/devices');
 const blockRoutes    = require('./routes/blocks');
 const reportRoutes   = require('./routes/reports');
 const radioRoutes    = require('./routes/radio');
+const inviteRoutes   = require('./routes/invites');
 
 require('./services/notifications');
 
@@ -58,6 +59,7 @@ app.use('/zones',                    zoneRoutes);
 app.use('/upload-url',               uploadRoutes);
 app.use('/devices',                  deviceRoutes);
 app.use('/radio',                    radioRoutes);
+app.use('/invites',                  inviteRoutes);
 app.use('/',                         blockRoutes);
 
 app.use('/users/:userId/posts', (req, res, next) => {
