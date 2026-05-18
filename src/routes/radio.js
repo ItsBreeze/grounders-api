@@ -92,12 +92,22 @@ router.get('/dial', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PUT /radio/dial { tiles: [...], groups: [...] }
+// PUT /radio/dial { tiles, groups, removed?, collapsed_groups? }
+// `removed` is the set of `<type>:<ref_id>` keys the user explicitly took
+// off the dial — kept so newly-added friends auto-appear without
+// resurrecting previously-removed ones. `collapsed_groups` is the set of
+// group ids currently collapsed in the UI.
 router.put('/dial', async (req, res, next) => {
   try {
     const tiles = Array.isArray(req.body.tiles) ? req.body.tiles : [];
     const groups = Array.isArray(req.body.groups) ? req.body.groups : [];
-    const state = { tiles, groups };
+    const removed = Array.isArray(req.body.removed)
+      ? req.body.removed.filter(x => typeof x === 'string')
+      : [];
+    const collapsedGroups = Array.isArray(req.body.collapsed_groups)
+      ? req.body.collapsed_groups.filter(x => typeof x === 'string')
+      : [];
+    const state = { tiles, groups, removed, collapsed_groups: collapsedGroups };
     await pool.query(
       `UPDATE users SET radio_dial_state = $1 WHERE id = $2`,
       [JSON.stringify(state), req.user.id]
