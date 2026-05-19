@@ -680,6 +680,75 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /radio/files/:id/copy-to-self — Copy a file into the caller's
+// self-workspace (member_count == 1, owner_id == me). Creates the
+// self-workspace if the caller doesn't have one yet. The new row reuses
+// the original r2_key (no new R2 storage) and records size_bytes = 0 so
+// the copier isn't double-charged. Useful for "save to my workspace"
+// drops.
+router.post('/files/:id/copy-to-self', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const fileId = req.params.id;
+
+    // Source must exist and be in a workspace the caller is a member of.
+    const { rows: [src] } = await pool.query(
+      `SELECT id, workspace_id, kind, r2_key, mime_type, filename,
+              duration_ms, text_content
+         FROM radio_files
+        WHERE id = $1`,
+      [fileId]
+    );
+    if (!src) return res.status(404).json({ error: 'File not found' });
+    if (!(await isMember(src.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member of source workspace' });
+    }
+
+    // Find existing self-workspace or create one.
+    const { rows: existing } = await pool.query(
+      `SELECT w.id
+         FROM radio_workspaces w
+         JOIN radio_workspace_members m ON m.workspace_id = w.id
+        WHERE w.owner_id = $1
+        GROUP BY w.id
+       HAVING COUNT(m.user_id) = 1
+        LIMIT 1`,
+      [myId]
+    );
+    let selfWsId;
+    if (existing.length) {
+      selfWsId = existing[0].id;
+    } else {
+      const newWsId = uuid();
+      await pool.query(
+        `INSERT INTO radio_workspaces (id, owner_id, name) VALUES ($1, $2, '')`,
+        [newWsId, myId]
+      );
+      await pool.query(
+        `INSERT INTO radio_workspace_members (workspace_id, user_id, added_by)
+         VALUES ($1, $2, $2)`,
+        [newWsId, myId]
+      );
+      selfWsId = newWsId;
+    }
+
+    // Insert copy. size_bytes = 0 (storage already counted on original).
+    const { rows: [copy] } = await pool.query(
+      `INSERT INTO radio_files
+         (workspace_id, owner_id, kind, r2_key, mime_type, filename,
+          size_bytes, duration_ms, text_content)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8)
+       RETURNING id, workspace_id, kind, mime_type, filename, duration_ms,
+                 text_content, created_at`,
+      [
+        selfWsId, myId, src.kind, src.r2_key, src.mime_type, src.filename,
+        src.duration_ms, src.text_content,
+      ]
+    );
+    res.status(201).json({ ...copy, workspace_id: selfWsId });
+  } catch (err) { next(err); }
+});
+
 // PATCH /radio/files/:id { manual_order?, group_id? } — any workspace member.
 // `manual_order` is a DOUBLE: items render sorted DESC by COALESCE(manual_order,
 // created_at_epoch_ms). `group_id` is a uuid (or null to ungroup). Pass either
