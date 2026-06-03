@@ -93,12 +93,18 @@ router.post('/request-otp', async (req, res, next) => {
     const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
 
     await pool.query(`UPDATE otps SET used = true WHERE target = $1 AND used = false`, [target]);
+    const otpId = uuid();
     await pool.query(
       `INSERT INTO otps (id, target, code_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-      [uuid(), target, hash, expiresAt]
+      [otpId, target, hash, expiresAt]
     );
 
     if (type === 'phone') await sendSms(target, code, brand);
+
+    // TEMPORARY DEBUG: log the OTP code + storage details so we can
+    // trace the "Incorrect code" issue when the user types correctly.
+    // Remove once root-caused.
+    console.log(`[DEBUG request-otp] target=${target} code=${code} otpId=${otpId} hashLen=${hash.length} expiresAt=${expiresAt.toISOString()}`);
 
     const body = { message: 'OTP sent' };
     if (!twilioClient) body._dev_otp = code;
@@ -153,9 +159,16 @@ router.post('/verify-otp', async (req, res, next) => {
       `SELECT * FROM otps WHERE target = $1 AND used = false AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
       [target]
     );
+    // TEMPORARY DEBUG: surface what the verify side actually receives
+    // and finds in the table so we can pinpoint where the mismatch is.
+    console.log(`[DEBUG verify-otp] target=${target} typedCode=${code} typedCodeLen=${code.length} foundRows=${otpRows.length}`);
+    if (otpRows.length) {
+      console.log(`[DEBUG verify-otp] otpId=${otpRows[0].id} target=${otpRows[0].target} hashLen=${otpRows[0].code_hash?.length} created_at=${otpRows[0].created_at} expires_at=${otpRows[0].expires_at}`);
+    }
     if (!otpRows.length) return res.status(401).json({ error: 'Code expired — request a new one' });
 
     const valid = await bcrypt.compare(code, otpRows[0].code_hash);
+    console.log(`[DEBUG verify-otp] bcrypt.compare result=${valid}`);
     if (!valid) return res.status(401).json({ error: 'Incorrect code' });
 
     await pool.query(`UPDATE otps SET used = true WHERE id = $1`, [otpRows[0].id]);
