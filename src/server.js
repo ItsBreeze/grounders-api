@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const app  = require('./app');
 const { reapDeletedUsers } = require('./jobs/reap_users');
 const { migrate } = require('./db/migrate');
+const { purgeExpired } = require('./services/mcp_oauth');
 
 const PORT = process.env.PORT || 3000;
 
@@ -9,6 +10,11 @@ const PORT = process.env.PORT || 3000;
 cron.schedule('0 3 * * *', () => {
   console.log('[reap_users] starting daily run');
   reapDeletedUsers();
+}, { timezone: 'UTC' });
+
+// Hourly — drop expired MCP auth codes and refresh tokens.
+cron.schedule('7 * * * *', () => {
+  purgeExpired().catch(err => console.error('[mcp_oauth] purge failed:', err.message));
 }, { timezone: 'UTC' });
 
 // Run idempotent schema migration before listening — safe to repeat.
