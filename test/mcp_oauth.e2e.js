@@ -173,6 +173,17 @@ const check = (name, cond, extra='') => {
   const badState = await fetch(`${BASE}/gmail/oauth/callback?code=x&state=forged`);
   check('forged OAuth state rejected', badState.status === 400);
 
+  // Must be LAST: tripping the password limiter would break the checks above.
+  let sawLimit = false, attempts = 0;
+  for (let i = 0; i < 14; i++) {
+    const r = await fetch(`${BASE}/mcp/oauth/authorize`, form({
+      client_id: client.client_id, redirect_uri: REDIRECT, response_type: 'code',
+      code_challenge: challenge, code_challenge_method: 'S256', password: `guess-${i}` }));
+    attempts++;
+    if (r.status === 429) { sawLimit = true; break; }
+  }
+  check('password guessing is rate-limited', sawLimit, `throttled after ${attempts} attempts`);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

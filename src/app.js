@@ -59,6 +59,18 @@ const mcpLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// The two endpoints that check MCP_ADMIN_PASSWORD are the only brute-forceable
+// surface on a public URL, so they get a far tighter budget than the tool
+// traffic around them. Successful requests don't count against it.
+const passwordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.use('/auth',                     otpLimiter, authRoutes);
@@ -88,6 +100,11 @@ app.get('/.well-known/oauth-authorization-server',
   oauthMetadata(() => mcpOauth.authorizationServerMetadata()));
 app.get('/.well-known/oauth-authorization-server/mcp',
   oauthMetadata(() => mcpOauth.authorizationServerMetadata()));
+
+app.post('/mcp/oauth/authorize',      passwordLimiter);
+app.post('/gmail/connect',           passwordLimiter);
+app.post('/gmail/unlink',            passwordLimiter);
+app.post('/gmail/accounts',          passwordLimiter);
 
 app.use('/mcp',                      mcpLimiter, mcpRoutes);
 app.use('/gmail',                    gmailLinkRoutes);
