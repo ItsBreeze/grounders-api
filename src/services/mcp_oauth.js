@@ -24,9 +24,9 @@ const sha256 = (input) => crypto.createHash('sha256').update(input).digest();
 const b64url = (buf) => buf.toString('base64url');
 
 function baseUrl() {
-  const url = process.env.PUBLIC_BASE_URL;
-  if (!url) throw new Error('PUBLIC_BASE_URL must be set');
-  return url.replace(/\/+$/, '');
+  const url = require('./google_oauth').normalizeBaseUrl(process.env.PUBLIC_BASE_URL);
+  if (!url) throw new Error('PUBLIC_BASE_URL is missing or malformed');
+  return url;
 }
 
 /**

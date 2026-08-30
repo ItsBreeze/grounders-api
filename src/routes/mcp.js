@@ -31,13 +31,24 @@ const REQUIRED_ENV = [
  * The rest of the API is unaffected either way.
  */
 function requireConfigured(req, res, next) {
-  const missing = REQUIRED_ENV.filter(key => !process.env[key]);
-  if (!missing.length) return next();
+  const missing = REQUIRED_ENV.filter(key => !String(process.env[key] || '').trim());
+  if (missing.length) {
+    return res.status(503).json({
+      error: 'Gmail connector is not configured on this deployment',
+      missing_env: missing,
+    });
+  }
 
-  res.status(503).json({
-    error: 'Gmail connector is not configured on this deployment',
-    missing_env: missing,
-  });
+  // Set but unusable is its own failure — and the one that otherwise shows up
+  // much later as Google's redirect_uri_mismatch.
+  if (!require('../services/google_oauth').normalizeBaseUrl(process.env.PUBLIC_BASE_URL)) {
+    return res.status(503).json({
+      error: 'PUBLIC_BASE_URL is malformed',
+      expected: 'a bare https origin with no path, e.g. https://your-app.up.railway.app',
+    });
+  }
+
+  next();
 }
 
 // ─── OAuth: dynamic client registration ─────────────────────────────────────
