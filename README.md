@@ -157,3 +157,77 @@ protected_zones     — lat/lng only, 500m radius default
 - [ ] Enable SSL on the DB connection
 - [ ] Set a strong `JWT_SECRET` (32+ random chars)
 - [ ] Add Redis for OTP dedup and reaction rate-limit caching
+
+---
+
+## Gmail multi-account MCP connector
+
+A remote [MCP](https://modelcontextprotocol.io) server that gives Claude access to
+**several Gmail accounts at once**. Claude's built-in Gmail connector holds exactly
+one Google account — connecting a second replaces the first. This holds as many as
+you link, and `search_messages` fans out across all of them in a single call.
+
+Self-contained: four tables, no foreign keys into the Grounders schema, its own env
+vars. Delete the routes and the migration block to remove it entirely.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/mcp` | MCP Streamable HTTP endpoint (Bearer auth) |
+| GET | `/mcp/oauth/authorize` | Consent screen — operator password |
+| POST | `/mcp/oauth/token` | Token + refresh grants |
+| POST | `/mcp/oauth/register` | RFC 7591 dynamic client registration |
+| GET | `/.well-known/oauth-protected-resource` | RFC 9728 discovery |
+| GET | `/.well-known/oauth-authorization-server` | RFC 8414 discovery |
+| GET | `/gmail/connect` | Link a mailbox (repeat per account) |
+| POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
+
+### Tools
+
+| Tool | Notes |
+|------|-------|
+| `list_accounts` | Which mailboxes are linked |
+| `search_messages` | Gmail query syntax. **Omit `account` to search every mailbox** |
+| `get_message` / `get_thread` | Full bodies, HTML flattened to text |
+| `send_message` | `account` picks the From address |
+| `reply_to_message` | Threads correctly via `In-Reply-To`/`References` |
+| `modify_labels` | Removing `INBOX` archives |
+| `trash_message` | Recoverable for 30 days |
+| `list_labels` | Label ids for `modify_labels` |
+
+### Setup
+
+1. **Google Cloud** — create a project, enable the Gmail API, configure the consent
+   screen as **External**, and add every Gmail address you plan to link as a
+   **test user**. Create an OAuth client of type **Web application** with the
+   authorized redirect URI set to exactly `<PUBLIC_BASE_URL>/gmail/oauth/callback`.
+2. **Env** — set `PUBLIC_BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+   `MCP_ADMIN_PASSWORD` and `TOKEN_ENC_KEY` (see `.env.example`), then deploy.
+3. **Link mailboxes** — visit `<PUBLIC_BASE_URL>/gmail/connect` once per account.
+4. **Add to Claude** — Settings → Connectors → Add custom connector →
+   `<PUBLIC_BASE_URL>/mcp`. Claude registers itself, sends you to the consent
+   screen, and you enter `MCP_ADMIN_PASSWORD` once.
+
+### Security notes
+
+- Gmail refresh and access tokens are AES-256-GCM encrypted at rest under
+  `TOKEN_ENC_KEY`. The database never holds a usable token.
+- Scope is `gmail.modify`: read, send, label, archive, trash. It deliberately
+  excludes the `mail.google.com` scope, so **nothing here can permanently delete
+  mail** — `trash_message` is recoverable for 30 days.
+- Authorization codes are single-use and hashed; PKCE S256 is required; refresh
+  tokens rotate on every use; `redirect_uri` must match the registration exactly.
+- While the Google app stays in **Testing**, refresh tokens expire after 7 days
+  and mailboxes must be re-linked. Publishing the app stops that, but Gmail's
+  restricted scopes then require Google verification.
+
+### Tests
+
+Both suites are plain Node — no framework, no new dependencies.
+
+```bash
+DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest
+npm start &                                        # then, against the running API:
+TEST_BASE_URL=http://127.0.0.1:3000  npm run test:mcp   # OAuth + MCP protocol
+```
