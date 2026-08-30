@@ -29,10 +29,19 @@ function baseUrl() {
   return url.replace(/\/+$/, '');
 }
 
+/**
+ * Signing key for MCP tokens — derived from JWT_SECRET, never JWT_SECRET itself.
+ *
+ * middleware/auth.js verifies Grounders user tokens with jwt.verify(token,
+ * JWT_SECRET) and no audience check. Signing connector tokens with that same
+ * key would make every MCP access token a valid user bearer token as well.
+ * Domain separation via HMAC keeps the two from ever validating each other,
+ * and needs no new env var or reissuing of existing user sessions.
+ */
 function secret() {
-  const value = process.env.JWT_SECRET;
-  if (!value) throw new Error('JWT_SECRET must be set');
-  return value;
+  const base = process.env.JWT_SECRET;
+  if (!base) throw new Error('JWT_SECRET must be set');
+  return crypto.createHmac('sha256', base).update('grounders-mcp-oauth-v1').digest('base64');
 }
 
 // ─── Metadata documents ─────────────────────────────────────────────────────
