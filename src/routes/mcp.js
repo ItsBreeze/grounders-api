@@ -19,6 +19,27 @@ const SERVER_INFO = { name: 'grounders-gmail-multi', version: '1.0.0' };
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// ─── Configuration guard ────────────────────────────────────────────────────
+
+const REQUIRED_ENV = [
+  'PUBLIC_BASE_URL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+  'MCP_ADMIN_PASSWORD', 'TOKEN_ENC_KEY',
+];
+
+/**
+ * A half-configured deploy should say so, not throw. Names only — never values.
+ * The rest of the API is unaffected either way.
+ */
+function requireConfigured(req, res, next) {
+  const missing = REQUIRED_ENV.filter(key => !process.env[key]);
+  if (!missing.length) return next();
+
+  res.status(503).json({
+    error: 'Gmail connector is not configured on this deployment',
+    missing_env: missing,
+  });
+}
+
 // ─── OAuth: dynamic client registration ─────────────────────────────────────
 
 router.post('/oauth/register', express.json(), async (req, res, next) => {
@@ -242,4 +263,4 @@ router.post('/', requireMcpAuth, async (req, res, next) => {
 router.get('/', requireMcpAuth, (req, res) => res.status(405).json({ error: 'SSE stream not supported' }));
 router.delete('/', requireMcpAuth, (req, res) => res.status(204).end());
 
-module.exports = { router, requireMcpAuth };
+module.exports = { router, requireMcpAuth, requireConfigured };

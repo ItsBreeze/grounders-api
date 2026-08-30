@@ -18,7 +18,7 @@ const reportRoutes   = require('./routes/reports');
 const radioRoutes    = require('./routes/radio');
 const inviteRoutes   = require('./routes/invites');
 const gmailLinkRoutes    = require('./routes/gmail_link');
-const { router: mcpRoutes } = require('./routes/mcp');
+const { router: mcpRoutes, requireConfigured } = require('./routes/mcp');
 const mcpOauth              = require('./services/mcp_oauth');
 
 require('./services/notifications');
@@ -88,9 +88,9 @@ app.use('/invites',                  inviteRoutes);
 // ─── Gmail multi-account MCP connector ──────────────────────────────────────
 // RFC 9728 / RFC 8414 discovery. Clients probe both the bare path and the
 // resource-path-suffixed form, so serve both.
-const oauthMetadata = (build) => (req, res, next) => {
+const oauthMetadata = (build) => [requireConfigured, (req, res, next) => {
   try { res.json(build()); } catch (err) { next(err); }
-};
+}];
 
 app.get('/.well-known/oauth-protected-resource',
   oauthMetadata(() => mcpOauth.protectedResourceMetadata()));
@@ -106,8 +106,8 @@ app.post('/gmail/connect',           passwordLimiter);
 app.post('/gmail/unlink',            passwordLimiter);
 app.post('/gmail/accounts',          passwordLimiter);
 
-app.use('/mcp',                      mcpLimiter, mcpRoutes);
-app.use('/gmail',                    gmailLinkRoutes);
+app.use('/mcp',                      mcpLimiter, requireConfigured, mcpRoutes);
+app.use('/gmail',                    requireConfigured, gmailLinkRoutes);
 app.use('/',                         blockRoutes);
 
 app.use('/users/:userId/posts', (req, res, next) => {
