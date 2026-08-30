@@ -18,16 +18,38 @@ const SCOPES = [
   'openid',
 ];
 
+/**
+ * PUBLIC_BASE_URL, trimmed and validated, with trailing slashes removed.
+ *
+ * A stray space or a pasted "PUBLIC_BASE_URL=" prefix would otherwise flow
+ * straight into the redirect URI and surface as Google's redirect_uri_mismatch
+ * — an error that points at the OAuth client rather than at the real cause.
+ * Returns null when unusable, so callers can report it plainly.
+ */
+function normalizeBaseUrl(raw) {
+  const value = String(raw || '').trim().replace(/\/+$/, '');
+  if (!value) return null;
+
+  let parsed;
+  try { parsed = new URL(value); } catch { return null; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+
+  // A bare origin only — no path, query or fragment.
+  if (parsed.pathname !== '/' || parsed.search || parsed.hash) return null;
+
+  return parsed.origin;
+}
+
 function config() {
-  const clientId     = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const baseUrl      = process.env.PUBLIC_BASE_URL;
+  const clientId     = (process.env.GOOGLE_CLIENT_ID || '').trim();
+  const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const baseUrl      = normalizeBaseUrl(process.env.PUBLIC_BASE_URL);
 
   if (!clientId || !clientSecret || !baseUrl) {
     throw new Error('GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and PUBLIC_BASE_URL must all be set');
   }
 
-  return { clientId, clientSecret, redirectUri: `${baseUrl.replace(/\/+$/, '')}/gmail/oauth/callback` };
+  return { clientId, clientSecret, redirectUri: `${baseUrl}/gmail/oauth/callback` };
 }
 
 /**
@@ -109,4 +131,4 @@ async function revoke(token) {
   }).catch(() => {}); // best-effort — local delete still proceeds
 }
 
-module.exports = { authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, config };
+module.exports = { normalizeBaseUrl, authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, config };

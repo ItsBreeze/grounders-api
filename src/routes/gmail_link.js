@@ -41,10 +41,19 @@ const page = (title, inner) => `<!doctype html>
 </style></head>
 <body><div class="card">${inner}</div></body></html>`;
 
+/** The exact redirect URI this deployment sends — a public value, safe to show. */
+function redirectUriInUse() {
+  try { return google.config().redirectUri; } catch { return '(unavailable — check PUBLIC_BASE_URL)'; }
+}
+
 const passwordForm = (error) => page('Link a Gmail account', `
   <h1>Link a Gmail account</h1>
   <p>Sign in with the operator password, then pick which Google account to link.
      Repeat this once per mailbox.</p>
+  <p>This server will send Google the redirect URI below. It must appear
+     <em>character for character</em> in your OAuth client's authorized redirect
+     URIs, or consent fails with <code>redirect_uri_mismatch</code>.</p>
+  <p><code>${escapeHtml(redirectUriInUse())}</code></p>
   ${error ? `<div class="err">${escapeHtml(error)}</div>` : ''}
   <form method="POST" action="/gmail/connect">
     <input type="password" name="password" placeholder="Operator password" autofocus required autocomplete="current-password">
