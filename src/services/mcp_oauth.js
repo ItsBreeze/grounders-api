@@ -228,9 +228,25 @@ function checkAdminPassword(supplied) {
   if (!expected) throw new Error('MCP_ADMIN_PASSWORD is not set — refusing to authorize');
   if (typeof supplied !== 'string' || !supplied) return false;
 
-  const a = sha256(supplied);
-  const b = sha256(expected);
-  return crypto.timingSafeEqual(a, b);
+  // Trim both sides. Copying a passphrase out of a chat or a dashboard field
+  // routinely picks up a trailing newline or space, and a mobile keyboard can
+  // append one on its own. Surrounding whitespace carries no entropy worth
+  // defending, and rejecting it produces an "incorrect password" that no
+  // amount of careful retyping can fix.
+  const given = supplied.trim();
+  const want  = expected.trim();
+
+  if (!given || !want) return false;
+
+  const match = crypto.timingSafeEqual(sha256(given), sha256(want));
+
+  if (!match) {
+    // Lengths only — never the values. Enough to tell a wrong passphrase from
+    // a stray character in the stored variable, from the server's own logs.
+    console.warn(`[mcp_oauth] password mismatch (supplied ${given.length} chars, expected ${want.length})`);
+  }
+
+  return match;
 }
 
 /** Housekeeping for expired codes and refresh tokens. */
