@@ -344,7 +344,7 @@ results.
 
 ### Tests
 
-Nine suites, all plain Node — no framework, no new dependencies. 338 checks.
+Nine suites, all plain Node — no framework, no new dependencies. 344 checks.
 
 ```bash
 # No database, no network:

@@ -171,10 +171,21 @@ router.get('/oauth/callback', async (req, res, next) => {
       ? ''
       : '<p class="err">Google returned no refresh token. If access stops working, unlink and re-link this account.</p>';
 
+    // What Google actually granted, not what was asked for: it drops scopes for
+    // APIs that are not enabled on the Cloud project, and does so silently.
+    const access  = accounts.productAccess(tokens.scope);
+    const missing = access.missing.length
+      ? `<p class="err">Google did not grant: <strong>${escapeHtml(access.missing.join(', '))}</strong>.
+         That almost always means those APIs are not enabled on the Google Cloud project.
+         Enable them under APIs &amp; Services → Library, then link this account again.</p>`
+      : '<p>All five products granted.</p>';
+
     res.type('html').send(page('Linked', `
       <h1><span class="ok">✓</span> ${escapeHtml(info.email)} linked</h1>
       ${warning}
-      <p>Mailboxes now connected (${linked.length}):</p>
+      <p>Access granted: <code>${escapeHtml(access.granted.join(', ') || 'none')}</code></p>
+      ${missing}
+      <p>Accounts now connected (${linked.length}):</p>
       <ul>${linked.map(a => `<li><code>${escapeHtml(a.email)}</code></li>`).join('')}</ul>
       <a class="btn" href="/gmail/connect">Link another account</a>`));
   } catch (err) {

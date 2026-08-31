@@ -22,12 +22,32 @@ const TOOLS = [
     handler: async ({ ownerKey }) => {
       const rows = await accounts.list(ownerKey);
       if (!rows.length) return text('No mailboxes linked yet.');
-      return text(rows.map(r => ({
-        email: r.email,
-        linked_at: r.created_at,
-        refresh_token_stored: r.has_refresh_token,
-        access_token_expires: r.token_expires_at,
-      })));
+
+      const listed = rows.map((r) => {
+        const access = accounts.productAccess(r.scopes);
+        return {
+          email: r.email,
+          linked_at: r.created_at,
+          refresh_token_stored: r.has_refresh_token,
+          access_token_expires: r.token_expires_at,
+          access: access.granted,
+          ...(access.missing.length ? { missing_access: access.missing } : {}),
+          ...(access.recorded ? {} : { note: 'No scopes were recorded for this account; what it can do is unknown until a call is tried.' }),
+        };
+      });
+
+      // Say it once, plainly, rather than leaving it to be inferred from rows.
+      const incomplete = listed.filter(a => a.missing_access);
+
+      return text({
+        accounts: listed,
+        ...(incomplete.length ? {
+          action_needed:
+            `${incomplete.map(a => `${a.email} is missing ${a.missing_access.join(', ')}`).join('; ')}. ` +
+            'Re-link at /gmail/connect to add them. If a product is still missing after re-linking, its API ' +
+            'is not enabled on the Google Cloud project — Google drops scopes for APIs that are switched off.',
+        } : {}),
+      });
     },
   },
 

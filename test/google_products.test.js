@@ -203,6 +203,30 @@ check('a prefix match is not a match', grantCovers('https://www.googleapis.com/a
 check('unrecorded scopes are not treated as proof of absence', grantCovers(null, 'calendar'));
 check('no product named means no gate', grantCovers(GMAIL, undefined));
 
+// ─── Reporting what was actually granted ────────────────────────────────────
+
+const G = 'https://www.googleapis.com/auth/';
+const productAccess = require('../src/services/gmail_accounts').productAccess;
+
+const gmailOnly = productAccess(`${G}gmail.modify`);
+check('a Gmail-only grant reports gmail as granted', gmailOnly.granted.join() === 'gmail');
+check('a Gmail-only grant names every product it lacks',
+  gmailOnly.missing.join() === 'calendar,drive,contacts,tasks', gmailOnly.missing.join());
+
+const full = productAccess([`${G}gmail.modify`, `${G}calendar`, `${G}drive`, `${G}contacts.readonly`, `${G}tasks`].join(' '));
+check('a complete grant has nothing missing', full.missing.length === 0, full.missing.join());
+check('a complete grant lists all five', full.granted.length === 5, full.granted.join());
+
+// The case that actually bites: Google drops a scope when its API is switched
+// off, so a partial grant must read as partial rather than as success.
+const partialGrant = productAccess([`${G}gmail.modify`, `${G}contacts.readonly`, `${G}tasks`].join(' '));
+check('a partial grant is reported as partial, not as success',
+  partialGrant.missing.join() === 'calendar,drive', partialGrant.missing.join());
+
+const unrecorded = productAccess(null);
+check('an unrecorded grant claims nothing either way',
+  unrecorded.recorded === false && unrecorded.granted.length === 0 && unrecorded.missing.length === 0);
+
 // ─── The assembled tool surface ─────────────────────────────────────────────
 
 const surface = require('../src/mcp/tools');

@@ -153,4 +153,20 @@ async function emailsFor(ownerKey) {
   return rows.map(r => r.email);
 }
 
-module.exports = { upsertFromGrant, list, remove, accessTokenFor, emailsFor, _internal: { grantCovers } };
+/**
+ * Which products a stored grant covers, and which it does not.
+ *
+ * Google silently drops a requested scope when its API is not enabled on the
+ * Cloud project, so "we asked for Drive" and "we have Drive" are different
+ * facts. This reports the second one, which is the only one that matters.
+ */
+function productAccess(scopes) {
+  const products = Object.keys(google.PRODUCT_SCOPES);
+  return {
+    granted: products.filter(p => scopes && grantCovers(scopes, p)),
+    missing: scopes ? products.filter(p => !grantCovers(scopes, p)) : [],
+    recorded: Boolean(scopes),
+  };
+}
+
+module.exports = { upsertFromGrant, list, remove, accessTokenFor, emailsFor, productAccess, _internal: { grantCovers } };
