@@ -7,13 +7,31 @@
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
-async function call(accessToken, path, { method = 'GET', query, body } = {}) {
+/**
+ * Build a Gmail API URL.
+ *
+ * Array values become repeated parameters, not a comma-joined one: Gmail
+ * expects metadataHeaders=From&metadataHeaders=Subject&… and silently returns
+ * a message with no headers at all if given "From,Subject" as a single value.
+ */
+function buildUrl(path, query) {
   const url = new URL(`${BASE}${path}`);
-  if (query) {
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+  if (!query) return url;
+
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue;
+
+    if (Array.isArray(value)) {
+      for (const item of value) url.searchParams.append(key, String(item));
+    } else {
+      url.searchParams.set(key, String(value));
     }
   }
+  return url;
+}
+
+async function call(accessToken, path, { method = 'GET', query, body } = {}) {
+  const url = buildUrl(path, query);
 
   const res = await fetch(url, {
     method,
@@ -194,5 +212,5 @@ const getProfile = (accessToken) => call(accessToken, '/profile');
 module.exports = {
   searchMessages, getMessage, getThread, sendMessage, getReplyContext,
   modifyLabels, trashMessage, listLabels, getProfile,
-  _internal: { buildMime, extractBody, encodeHeader },
+  _internal: { buildMime, extractBody, encodeHeader, buildUrl },
 };
