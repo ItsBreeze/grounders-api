@@ -230,6 +230,48 @@ async function share(accessToken, fileId, { email, domain, anyone, role = 'reade
   return { id: created.id, type: created.type, role: created.role, who: created.emailAddress || created.domain || 'anyone with the link' };
 }
 
+/**
+ * Withdraw access that was granted earlier.
+ *
+ * The counterpart to `share`, and the reason sharing can be offered at all: an
+ * access grant nobody can take back is a one-way door. A permission is named
+ * either by id, or by who holds it — a person, a domain, or the public link.
+ */
+async function unshare(accessToken, fileId, { permissionId, email, domain, publicLink }) {
+  let id      = permissionId;
+  let matched = null;
+
+  if (!id) {
+    const permissions = await listPermissions(accessToken, fileId);
+    const wanted = permissions.filter(p =>
+      (email      && p.who.toLowerCase() === String(email).toLowerCase()) ||
+      (domain     && p.type === 'domain' && p.who.toLowerCase() === String(domain).toLowerCase()) ||
+      (publicLink && p.type === 'anyone'));
+
+    if (!wanted.length) {
+      throw new Error('No matching permission on that file — get_file_permissions shows what is actually there.');
+    }
+    if (wanted.length > 1) {
+      throw new Error(`That matches ${wanted.length} permissions — pass permission_id from get_file_permissions instead.`);
+    }
+
+    matched = wanted[0];
+    id      = matched.id;
+  }
+
+  await call(accessToken, `/files/${encode(fileId)}/permissions/${encode(id)}`, { method: 'DELETE' });
+  return { permission_id: id, ...(matched ? { removed: matched } : {}) };
+}
+
+async function untrashFile(accessToken, fileId) {
+  const file = await call(accessToken, `/files/${encode(fileId)}`, {
+    method: 'PATCH',
+    query:  { fields: FILE_FIELDS },
+    body:   { trashed: false },
+  });
+  return summarizeFile(file);
+}
+
 async function trashFile(accessToken, fileId) {
   const file = await call(accessToken, `/files/${encode(fileId)}`, {
     method: 'PATCH',
@@ -241,7 +283,7 @@ async function trashFile(accessToken, fileId) {
 
 module.exports = {
   searchFiles, listRecent, getMetadata, getContent, createFile, updateFile,
-  copyFile, listPermissions, share, trashFile,
+  copyFile, listPermissions, share, unshare, trashFile, untrashFile,
   MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS,
   _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText },
 };

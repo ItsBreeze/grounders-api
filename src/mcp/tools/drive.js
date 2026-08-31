@@ -29,8 +29,9 @@ const PUBLIC_SHARING = /^(1|true|yes|on)$/i.test(String(process.env.DRIVE_ALLOW_
 const SHARE_TARGET_PROPS = PUBLIC_SHARING
   ? {
       email:  { type: 'string', description: 'Person to share with.' },
-      domain: { type: 'string', description: 'Share with everyone at this domain instead.' },
-      anyone: { type: 'boolean', description: 'PUBLISH: anyone holding the link can open it. Confirm with the user first.' },
+      domain: { type: 'string', description: 'Share with everyone at this Workspace domain instead. Requires confirm_public.' },
+      anyone: { type: 'boolean', description: 'PUBLISH: anyone holding the link can open it, no sign-in. Requires confirm_public.' },
+      confirm_public: { type: 'boolean', description: 'Confirms the user asked for access beyond a named person. Required with domain or anyone.' },
     }
   : {
       email:  { type: 'string', description: 'Person to share with, by email address.' },
@@ -268,6 +269,16 @@ const TOOLS = [
           'set DRIVE_ALLOW_PUBLIC_SHARING=true to enable them.',
         );
       }
+      if ((args.domain || args.anyone) && !args.confirm_public) {
+        throw new Error(
+          'Sharing beyond a named person needs confirm_public: true. ' +
+          (args.anyone
+            ? 'anyone: true means everyone holding the URL can open it, with no sign-in'
+            : `domain sharing means everyone at ${args.domain}`) +
+          ' — check that is what the user asked for, then repeat the call with confirm_public: true. ' +
+          'unshare_file undoes it.',
+        );
+      }
       if (!args.email && !args.domain && !args.anyone) {
         throw new Error('Pass `email`, `domain`, or anyone: true — who is this being shared with?');
       }
@@ -286,6 +297,53 @@ const TOOLS = [
       });
 
       return text({ account: email, file_id: args.file_id, shared_with: permission });
+    },
+  },
+
+  {
+    name: 'unshare_file',
+    description:
+      'Withdraw access previously granted: from one person by email, from a domain, or by removing the ' +
+      'public link entirely (public: true). Name the holder or pass a permission_id from ' +
+      'get_file_permissions. This is the undo for share_file — reach for it whenever a file turned out ' +
+      'to be shared more widely than intended.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...ACCOUNT_PROP,
+        ...FILE_PROP,
+        email:         { type: 'string', description: 'Revoke this person\'s access.' },
+        domain:        { type: 'string', description: 'Revoke a whole domain\'s access.' },
+        public:        { type: 'boolean', description: 'Remove the "anyone with the link" permission.' },
+        permission_id: { type: 'string', description: 'Exact permission to remove, from get_file_permissions.' },
+      },
+      required: ['file_id'],
+    },
+    handler: async ({ ownerKey, args }) => {
+      if (!args.email && !args.domain && !args.public && !args.permission_id) {
+        throw new Error('Pass `email`, `domain`, public: true, or a `permission_id` — whose access is being removed?');
+      }
+
+      const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+      const result = await drive.unshare(token, args.file_id, {
+        permissionId: args.permission_id,
+        email:        args.email,
+        domain:       args.domain,
+        publicLink:   args.public,
+      });
+
+      return text({ account: email, file_id: args.file_id, revoked: true, ...result });
+    },
+  },
+
+  {
+    name: 'untrash_file',
+    description: 'Restore a file from the Drive trash. The undo for trash_file, within the 30-day window.',
+    inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP, ...FILE_PROP }, required: ['file_id'] },
+    handler: async ({ ownerKey, args }) => {
+      const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+      const file = await drive.untrashFile(token, args.file_id);
+      return text({ account: email, ...file, status: 'restored from trash' });
     },
   },
 

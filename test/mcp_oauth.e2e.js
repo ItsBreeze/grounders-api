@@ -123,11 +123,11 @@ const check = (name, cond, extra='') => {
 
   const list = await rpc({jsonrpc:'2.0', id:2, method:'tools/list'});
   const names = (list.json?.result?.tools || []).map(t => t.name);
-  check('tools/list returns 50 tools', names.length === 50, `got ${names.length}`);
+  check('tools/list returns 52 tools', names.length === 52, `got ${names.length}`);
   for (const required of [
     'search_messages','search_threads','create_draft','get_attachment','forward_message','untrash_message','mark_spam',
     'list_calendars','list_events','search_events','create_event','respond_to_event','suggest_time',
-    'search_files','read_file_content','share_file','trash_file',
+    'search_files','read_file_content','share_file','unshare_file','trash_file','untrash_file',
     'search_contacts','list_tasks','create_task',
   ]) {
     check(`tool ${required} present`, names.includes(required));

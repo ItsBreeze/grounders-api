@@ -184,7 +184,7 @@ vars. Delete the routes and the migration block to remove it entirely.
 | GET | `/gmail/connect` | Link an account (repeat per account) |
 | POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
 
-### Tools (50)
+### Tools (52)
 
 Every tool takes an optional `account`. On a search, **omitting it fans the call
 out across every linked account** and merges the results — the thing no
@@ -212,15 +212,15 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 | RSVP | `respond_to_event` | accepted / declined / tentative, as the account that was invited; notifies the organiser by default |
 | Scheduling | `suggest_time` | Free slots across **every** linked calendar at once — busy anywhere means busy. Returns whole gaps rather than chopping a 3-hour opening into six half-hour slots |
 
-#### Drive (11)
+#### Drive (13)
 
 | Area | Tools | Notes |
 |------|-------|-------|
 | Find | `search_files`, `list_recent_files`, `get_file_metadata` | Text search over names and contents, with optional raw Drive query syntax in `filter`. Trashed files excluded unless you ask for them |
 | Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides are exported (Sheets as CSV); text caps at 60 KB, binaries at 2 MB base64 |
 | Write | `create_file`, `update_file`, `copy_file` | Text content in, folders via `parents`. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
-| Sharing | `get_file_permissions`, `share_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true` |
-| Remove | `trash_file` | Trash only, recoverable for 30 days — see the scope note below |
+| Sharing | `get_file_permissions`, `share_file`, `unshare_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true`, and then still need `confirm_public`. **`unshare_file` withdraws access** — by person, by domain, or by removing the public link |
+| Remove | `trash_file`, `untrash_file` | Trash and restore, within the 30-day window — see the scope note below |
 
 #### Contacts (2) and Tasks (5)
 
@@ -264,6 +264,11 @@ so "create this event" is never ambiguous about whose calendar it lands in.
   enforced by the tool surface instead: `trash_file` trashes, and no tool reaches
   Drive's permanent-delete endpoint. That is a weaker guarantee than Gmail's,
   because it is a matter of what is exposed rather than what is possible.
+- **Every outward action has an undo, which is the condition for offering it.**
+  `unshare_file` withdraws any grant `share_file` can make, and `untrash_file`
+  restores what `trash_file` removed. The first-party connector has neither,
+  so a permission it grants cannot be taken back through the same interface.
+  This is the one place the wider surface here is also the safer one.
 - **Contacts are read-only** by scope, not just by omission.
 - **Drive writes are guarded where the first-party connector is simply narrower.**
   Claude's Drive connector shares with one email address and a role — it has no
@@ -272,7 +277,9 @@ so "create this event" is never ambiguous about whose calendar it lands in.
   looks alarming in a tool result:
   - `share_file` takes a named person only. Domain-wide and public-link sharing
     need `DRIVE_ALLOW_PUBLIC_SHARING=true`, and are refused outright otherwise
-    rather than quietly narrowed to something safer.
+    rather than quietly narrowed to something safer. Even enabled, they need
+    `confirm_public: true` as a second signal, and the refusal spells out what
+    the grant would actually mean before it is repeated.
   - Overwriting a file's contents needs `replace_content: true` alongside
     `content`, so a rename can never destroy a document as a side effect.
 - Authorization codes are single-use and hashed; PKCE S256 is required; refresh
@@ -303,7 +310,7 @@ results.
 
 ### Tests
 
-Seven suites, all plain Node — no framework, no new dependencies. 228 checks.
+Seven suites, all plain Node — no framework, no new dependencies. 242 checks.
 
 ```bash
 # No database, no network:

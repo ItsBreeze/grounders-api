@@ -89,6 +89,25 @@ const call = async (tools, name, args) => {
   check('an acknowledged overwrite passes the guard',
     !confirmed.ok && confirmed.message.includes('No accounts are linked'), confirmed.message);
 
+  // ─── Undo exists, which is what makes sharing offerable at all ────────────
+  const unshare = locked.find(t => t.name === 'unshare_file');
+  const untrash = locked.find(t => t.name === 'untrash_file');
+
+  check('there is a way to withdraw access', Boolean(unshare));
+  check('there is a way to restore a trashed file', Boolean(untrash));
+  check('unshare can target the public link specifically', 'public' in unshare.inputSchema.properties);
+  check('unshare can target a person', 'email' in unshare.inputSchema.properties);
+  check('unshare can target an exact permission', 'permission_id' in unshare.inputSchema.properties);
+
+  const vagueUnshare = await call(locked, 'unshare_file', { file_id: 'f1' });
+  check('unshare with no target is refused',
+    !vagueUnshare.ok && vagueUnshare.message.includes('whose access is being removed'), vagueUnshare.message);
+
+  // Revoking is never gated — the safe direction must not need a flag.
+  const revokePublic = await call(locked, 'unshare_file', { file_id: 'f1', public: true });
+  check('revoking the public link works even with public sharing disabled',
+    !revokePublic.ok && revokePublic.message.includes('No accounts are linked'), revokePublic.message);
+
   // ─── Opt-in restores the wider surface ────────────────────────────────────
   const opened     = loadDrive(true);
   const openShare  = opened.find(t => t.name === 'share_file');
@@ -98,9 +117,25 @@ const call = async (tools, name, args) => {
   check('the opened description warns rather than denies',
     /publishes it/.test(openShare.description), openShare.description);
 
-  const nowAllowed = await call(opened, 'share_file', { file_id: 'f1', anyone: true });
-  check('with the flag on, a public share is no longer refused outright',
+  // Enabled is not the same as unguarded: it still takes a second signal.
+  const unconfirmed = await call(opened, 'share_file', { file_id: 'f1', anyone: true });
+  check('with the flag on, publishing still needs confirm_public',
+    !unconfirmed.ok && unconfirmed.message.includes('confirm_public: true'), unconfirmed.message);
+  check('the refusal spells out what publishing actually means',
+    unconfirmed.message.includes('no sign-in'), unconfirmed.message);
+  check('the refusal names the undo', unconfirmed.message.includes('unshare_file'), unconfirmed.message);
+
+  const unconfirmedDomain = await call(opened, 'share_file', { file_id: 'f1', domain: 'example.com' });
+  check('domain sharing needs confirm_public too, and names the domain',
+    !unconfirmedDomain.ok && unconfirmedDomain.message.includes('everyone at example.com'), unconfirmedDomain.message);
+
+  const nowAllowed = await call(opened, 'share_file', { file_id: 'f1', anyone: true, confirm_public: true });
+  check('a confirmed public share passes the guards',
     !nowAllowed.ok && nowAllowed.message.includes('No accounts are linked'), nowAllowed.message);
+
+  const namedPerson = await call(opened, 'share_file', { file_id: 'f1', email: 'ann@x.com' });
+  check('sharing with a named person never needs confirm_public',
+    !namedPerson.ok && namedPerson.message.includes('No accounts are linked'), namedPerson.message);
 
   loadDrive(false);
 
