@@ -14,6 +14,28 @@ const FILE_PROP = { file_id: { type: 'string', description: 'Drive file id, from
 
 const ROLES = ['reader', 'commenter', 'writer'];
 
+/**
+ * Sharing beyond a named person — a whole domain, or anyone holding the link —
+ * is off unless the operator turns it on.
+ *
+ * Claude's first-party Drive connector shares with one email address and a role,
+ * full stop: it has no way to publish a file. Matching that default matters
+ * because the failure is silent and one-way — a model that misreads "share this
+ * with the team" as a public link produces a URL that works for anyone who ever
+ * sees it, and nothing about the result looks alarming.
+ */
+const PUBLIC_SHARING = /^(1|true|yes|on)$/i.test(String(process.env.DRIVE_ALLOW_PUBLIC_SHARING || '').trim());
+
+const SHARE_TARGET_PROPS = PUBLIC_SHARING
+  ? {
+      email:  { type: 'string', description: 'Person to share with.' },
+      domain: { type: 'string', description: 'Share with everyone at this domain instead.' },
+      anyone: { type: 'boolean', description: 'PUBLISH: anyone holding the link can open it. Confirm with the user first.' },
+    }
+  : {
+      email:  { type: 'string', description: 'Person to share with, by email address.' },
+    };
+
 const TOOLS = [
   {
     name: 'search_files',
@@ -149,23 +171,32 @@ const TOOLS = [
   {
     name: 'update_file',
     description:
-      'Rename a file, change its description, replace its text content, or move it between folders. ' +
-      'Passing `content` REPLACES the file\'s contents entirely.',
+      'Rename a file, change its description, or move it between folders. ' +
+      'Replacing the contents is possible but deliberately awkward: it needs BOTH `content` and ' +
+      'replace_content: true, so a rename can never overwrite a document by accident.',
     inputSchema: {
       type: 'object',
       properties: {
         ...ACCOUNT_PROP,
         ...FILE_PROP,
-        name:           { type: 'string' },
-        content:        { type: 'string', description: 'New content, replacing what is there.' },
-        mime_type:      { type: 'string' },
-        description:    { type: 'string' },
+        name:            { type: 'string' },
+        content:         { type: 'string', description: 'New content. Requires replace_content: true.' },
+        replace_content: { type: 'boolean', description: 'Confirms that `content` should overwrite what is in the file now.' },
+        mime_type:       { type: 'string' },
+        description:     { type: 'string' },
         add_parents:    { type: 'string', description: 'Folder id to move it into.' },
         remove_parents: { type: 'string', description: 'Folder id to move it out of.' },
       },
       required: ['file_id'],
     },
     handler: async ({ ownerKey, args }) => {
+      if (args.content !== undefined && !args.replace_content) {
+        throw new Error(
+          'Replacing a file\'s contents needs replace_content: true alongside `content`. ' +
+          'To rename or move it instead, pass `name` or add_parents and leave `content` out.',
+        );
+      }
+
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
       const file = await drive.updateFile(token, args.file_id, {
         name:          args.name,
@@ -212,18 +243,18 @@ const TOOLS = [
 
   {
     name: 'share_file',
-    description:
-      'Grant access to a file: to one person by email, to a whole domain, or to anyone with the link. ' +
-      'This exposes the file outside its current audience — confirm with the user before widening access, ' +
-      'and note that `anyone: true` makes it readable by anybody holding the URL.',
+    description: PUBLIC_SHARING
+      ? 'Grant access to a file: to one person by email, to a whole domain, or to anyone with the link. ' +
+        'This exposes the file outside its current audience — confirm with the user before widening access, ' +
+        'and note that `anyone: true` publishes it to anybody holding the URL.'
+      : 'Share a file with one person by email address, at reader, commenter or writer level. ' +
+        'Publishing to a whole domain or to anyone with the link is disabled on this server.',
     inputSchema: {
       type: 'object',
       properties: {
         ...ACCOUNT_PROP,
         ...FILE_PROP,
-        email:   { type: 'string', description: 'Person to share with.' },
-        domain:  { type: 'string', description: 'Share with everyone at this domain instead.' },
-        anyone:  { type: 'boolean', description: 'Share with anyone holding the link. Public.' },
+        ...SHARE_TARGET_PROPS,
         role:    { type: 'string', enum: ROLES, description: 'Access level. Defaults to reader.' },
         notify:  { type: 'boolean', description: 'Email the person about it. Default false.' },
         message: { type: 'string', description: 'Note to include, when notify is true.' },
@@ -231,6 +262,12 @@ const TOOLS = [
       required: ['file_id'],
     },
     handler: async ({ ownerKey, args }) => {
+      if (!PUBLIC_SHARING && (args.domain || args.anyone)) {
+        throw new Error(
+          'This server shares with named people only. Domain-wide and public-link sharing are off; ' +
+          'set DRIVE_ALLOW_PUBLIC_SHARING=true to enable them.',
+        );
+      }
       if (!args.email && !args.domain && !args.anyone) {
         throw new Error('Pass `email`, `domain`, or anyone: true — who is this being shared with?');
       }

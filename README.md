@@ -218,8 +218,8 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 |------|-------|-------|
 | Find | `search_files`, `list_recent_files`, `get_file_metadata` | Text search over names and contents, with optional raw Drive query syntax in `filter`. Trashed files excluded unless you ask for them |
 | Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides are exported (Sheets as CSV); text caps at 60 KB, binaries at 2 MB base64 |
-| Write | `create_file`, `update_file`, `copy_file` | Text content in, folders via `parents`. `update_file` with `content` replaces the file |
-| Sharing | `get_file_permissions`, `share_file` | Check who can see it before widening access; `share_file` handles one person, a domain, or anyone with the link |
+| Write | `create_file`, `update_file`, `copy_file` | Text content in, folders via `parents`. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
+| Sharing | `get_file_permissions`, `share_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true` |
 | Remove | `trash_file` | Trash only, recoverable for 30 days — see the scope note below |
 
 #### Contacts (2) and Tasks (5)
@@ -265,9 +265,16 @@ so "create this event" is never ambiguous about whose calendar it lands in.
   Drive's permanent-delete endpoint. That is a weaker guarantee than Gmail's,
   because it is a matter of what is exposed rather than what is possible.
 - **Contacts are read-only** by scope, not just by omission.
-- `share_file` widens who can see a document, and `anyone: true` makes it readable
-  by anybody with the URL. The tool says so in its description; treat it as an
-  outward-facing action.
+- **Drive writes are guarded where the first-party connector is simply narrower.**
+  Claude's Drive connector shares with one email address and a role — it has no
+  way to publish a file — and its `update_file` changes only the title and parent.
+  Two guards match that default, because both failures are one-way and neither
+  looks alarming in a tool result:
+  - `share_file` takes a named person only. Domain-wide and public-link sharing
+    need `DRIVE_ALLOW_PUBLIC_SHARING=true`, and are refused outright otherwise
+    rather than quietly narrowed to something safer.
+  - Overwriting a file's contents needs `replace_content: true` alongside
+    `content`, so a rename can never destroy a document as a side effect.
 - Authorization codes are single-use and hashed; PKCE S256 is required; refresh
   tokens rotate on every use; `redirect_uri` must match the registration exactly.
 - While the Google app stays in **Testing**, refresh tokens expire after 7 days
@@ -296,7 +303,7 @@ results.
 
 ### Tests
 
-Six suites, all plain Node — no framework, no new dependencies. 211 checks.
+Seven suites, all plain Node — no framework, no new dependencies. 228 checks.
 
 ```bash
 # No database, no network:
@@ -306,6 +313,7 @@ npm run test:mime       # entity decoding, body truncation, MIME construction
 npm run test:threads    # address parsing, thread summaries, cross-account fan-out
 npm run test:products   # free-slot arithmetic, Drive query quoting, multipart
                         # upload framing, task dates, scope gating, tool-surface shape
+npm run test:drive-safety   # the sharing and overwrite guards, both env states
 
 # Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest
