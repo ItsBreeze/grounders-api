@@ -14,6 +14,9 @@ own file at the repository root, titled with the application's name:
 | Grounders API | `README.md` |
 | Google Multi-Account Connector | `GOOGLE-CONNECTOR.md` |
 
+Decisions and their reasoning go in `PROJECT-LOG.md` — the why behind a choice
+does not survive in a diff, and it is what you need when changing that choice.
+
 The root README links to each of them in a short section near the end, saying
 what the component is and how it relates to the API, and nothing more. The
 detail lives in the component's own file.

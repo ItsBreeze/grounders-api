@@ -57,7 +57,7 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 |------|-------|-------|
 | Find | `search_files`, `list_recent_files`, `get_file_metadata`, `list_shared_drives` | Text search over names and contents, with optional raw Drive query syntax in `filter`. **Covers My Drive and every shared drive at once**; `drive_id` narrows to one. Trashed files excluded unless you ask for them |
 | Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides exported (Sheets as CSV); **PDF, Word, Excel, PowerPoint and OpenDocument extracted to text**; `ocr: true` routes scans and images through Google's own conversion; `include_comments` returns the comment threads. `download_file_content` takes `export_as` — turn a Doc into a PDF or docx, a Sheet into xlsx. Text caps at 60 KB, binaries at 2 MB base64 |
-| Write | `create_file`, `update_file`, `copy_file` | Text via `content`, binary via `content_base64`. `convert_to` makes Drive convert the upload into an editable Doc, Sheet or Slides — or a folder. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
+| Write | `create_file`, `update_file`, `copy_file` | Text via `content`, binary via `content_base64`. `convert_to` makes Drive convert the upload into an editable Doc, Sheet or Slides — or a folder. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true`. **On a file you do not own it edits a private copy** — see below |
 | Comment | `comment_on_file` | Leave a comment on a draft, or reply to a thread — the review path that changes nothing in the document |
 | Sharing | `get_file_permissions`, `share_file`, `unshare_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true`, and then still need `confirm_public`. **`unshare_file` withdraws access** — by person, by domain, or by removing the public link |
 | Remove | `trash_file`, `untrash_file` | Trash and restore, within the 30-day window — see the scope note below |
@@ -121,12 +121,45 @@ confines a search to one.
 
 This widens what writes can reach as well as reads: a file in a shared drive was
 previously unreachable by `update_file`, `share_file` or `trash_file`, and now is.
-That is deliberate — a connector that can find a document but not fix a typo in it
-is a strange half-tool — but it means the guards above are doing more work than
-before, since a shared drive holds an organisation's documents rather than one
-person's. They are unchanged and still apply: contents cannot be overwritten
-without `replace_content`, sharing cannot pass a named person without
-`confirm_public`, and both `unshare_file` and `untrash_file` remain the undo.
+Since a shared drive holds an organisation's documents rather than one person's,
+that is exactly the case the ownership rule below exists for.
+
+A drive is named wherever it can be. `drives.list` covers the drives this account
+is a **member** of; a file can also reach you from a drive you are not in, via a
+folder shared directly. A shared drive's id is also its root folder's id, so
+asking for that folder names the drive where membership cannot. A drive that
+resists both keeps its bare id, which is still true.
+
+## Writes land on files you own
+
+A file owned by someone else — or by an organisation, which is **every file in a
+shared drive, including ones you created there** — is not this connector's to
+change on a model's judgement.
+
+| Situation | What happens |
+|---|---|
+| You own it | The write happens |
+| You do not | A **private copy** is made in your My Drive and edited there |
+| You want the original | `edit_original: true` returns a **draft** and writes nothing |
+| The user approves | `confirm_edit: true` applies it |
+
+The draft is the point. It states each field as `from → to`, and for a content
+replacement it reads what is there now and shows **the lines that actually
+change** — not just "this will overwrite 40 KB". Binary content says a preview is
+impossible rather than faking one. Nothing is written until a second call
+arrives, so a person sees the specific change before it lands rather than being
+told afterwards which of their colleague's documents moved.
+
+The private copy names `parents: ['root']` deliberately: `files.copy` with no
+parent puts the copy beside the source, which for a shared-drive file would leave
+it in that same shared drive — still not private.
+
+`share_file` and `trash_file` draft too, but have **no copy path**: copying a
+colleague's document and sharing that spreads their content further, not less.
+
+**Revoking and restoring are never gated.** `unshare_file` and `untrash_file`
+work without confirmation on any file, yours or not. Widening access needs
+approval; narrowing never does. A brake that needs permission is not a brake.
 
 ## Repeating events
 
@@ -240,7 +273,7 @@ results.
 
 ## Tests
 
-Ten suites, all plain Node — no framework, no new dependencies. 394 checks.
+Eleven suites, all plain Node — no framework, no new dependencies. 433 checks.
 
 ```bash
 # No database, no network:
@@ -255,6 +288,8 @@ npm run test:extract    # PDF and Office text extraction, against real fixtures
 npm run test:drive-parity   # upload framing, conversion, export and comments, on the wire
 npm run test:reach      # shared-drive request parameters, recurrence rules, and which
                         # event a scoped write actually lands on
+npm run test:ownership  # which file id a write reaches, that a draft writes nothing,
+                        # and that revoking is never gated
 
 # Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest
