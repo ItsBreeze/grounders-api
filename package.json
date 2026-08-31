@@ -10,7 +10,8 @@
     "test:mcp": "node test/mcp_oauth.e2e.js",
     "test:accounts": "node test/gmail_accounts.test.js",
     "test:tokens": "node test/token_separation.test.js",
-    "test:query": "node test/gmail_query.test.js"
+    "test:query": "node test/gmail_query.test.js",
+    "test:mime": "node test/gmail_mime.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

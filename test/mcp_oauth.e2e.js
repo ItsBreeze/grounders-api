@@ -123,7 +123,10 @@ const check = (name, cond, extra='') => {
 
   const list = await rpc({jsonrpc:'2.0', id:2, method:'tools/list'});
   const names = (list.json?.result?.tools || []).map(t => t.name);
-  check('tools/list returns 9 tools', names.length === 9, names.join(','));
+  check('tools/list returns 22 tools', names.length === 22, `got ${names.length}`);
+  for (const required of ['search_messages','create_draft','get_attachment','forward_message','untrash_message','mark_spam']) {
+    check(`tool ${required} present`, names.includes(required));
+  }
 
   const sse = await rpc({jsonrpc:'2.0', id:3, method:'ping'}, 'text/event-stream');
   check('SSE-only client gets event-stream', (sse.ctype||'').includes('text/event-stream') && sse.text.startsWith('event: message'));
