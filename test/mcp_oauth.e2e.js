@@ -123,10 +123,17 @@ const check = (name, cond, extra='') => {
 
   const list = await rpc({jsonrpc:'2.0', id:2, method:'tools/list'});
   const names = (list.json?.result?.tools || []).map(t => t.name);
-  check('tools/list returns 23 tools', names.length === 23, `got ${names.length}`);
-  for (const required of ['search_messages','search_threads','create_draft','get_attachment','forward_message','untrash_message','mark_spam']) {
+  check('tools/list returns 50 tools', names.length === 50, `got ${names.length}`);
+  for (const required of [
+    'search_messages','search_threads','create_draft','get_attachment','forward_message','untrash_message','mark_spam',
+    'list_calendars','list_events','search_events','create_event','respond_to_event','suggest_time',
+    'search_files','read_file_content','share_file','trash_file',
+    'search_contacts','list_tasks','create_task',
+  ]) {
     check(`tool ${required} present`, names.includes(required));
   }
+  check('every product is represented',
+    ['get_message','get_event','get_file_metadata','search_contacts','list_task_lists'].every(n => names.includes(n)));
 
   const sse = await rpc({jsonrpc:'2.0', id:3, method:'ping'}, 'text/event-stream');
   check('SSE-only client gets event-stream', (sse.ctype||'').includes('text/event-stream') && sse.text.startsWith('event: message'));
@@ -155,6 +162,34 @@ const check = (name, cond, extra='') => {
     (badPage.json?.result?.content?.[0]?.text || '').includes('page_token requires'),
     badPage.json?.result?.content?.[0]?.text);
 
+  // Every product must fail the same way with nothing linked — a Calendar or
+  // Drive call must not look like "you have no events" when it means "no accounts".
+  for (const [id, name, args] of [
+    [5.3, 'list_events',    {}],
+    [5.4, 'search_files',   {query:'lease'}],
+    [5.5, 'search_contacts',{query:'ann'}],
+    [5.6, 'list_tasks',     {}],
+    [5.7, 'suggest_time',   {duration_minutes:30}],
+  ]) {
+    const res = await rpc({jsonrpc:'2.0', id, method:'tools/call', params:{name, arguments:args}});
+    check(`${name} with no accounts is a hard error`,
+      res.json?.result?.isError === true &&
+      (res.json?.result?.content?.[0]?.text || '').includes('No accounts are linked'),
+      res.json?.result?.content?.[0]?.text);
+  }
+
+  const badShare = await rpc({jsonrpc:'2.0', id:5.8, method:'tools/call',
+    params:{name:'share_file', arguments:{file_id:'abc'}}});
+  check('share_file demands to know who it is sharing with',
+    (badShare.json?.result?.content?.[0]?.text || '').includes('who is this being shared with'),
+    badShare.json?.result?.content?.[0]?.text);
+
+  const badRsvp = await rpc({jsonrpc:'2.0', id:5.9, method:'tools/call',
+    params:{name:'respond_to_event', arguments:{event_id:'e1', response:'maybe'}}});
+  check('respond_to_event rejects a response Google does not have',
+    (badRsvp.json?.result?.content?.[0]?.text || '').includes('response must be one of'),
+    badRsvp.json?.result?.content?.[0]?.text);
+
   const unknown = await rpc({jsonrpc:'2.0', id:6, method:'nonsense/method'});
   check('unknown method → -32601', unknown.json?.error?.code === -32601);
 
@@ -174,7 +209,10 @@ const check = (name, cond, extra='') => {
 
   // 8. gmail link gate
   const linkPage = await fetch(`${BASE}/gmail/connect`);
-  check('link page renders', linkPage.status === 200 && (await linkPage.text()).includes('Link a Gmail account'));
+  const linkHtml = await linkPage.text();
+  check('link page renders', linkPage.status === 200 && linkHtml.includes('Link a Google account'));
+  check('link page discloses what the grant covers',
+    ['Gmail', 'Calendar', 'Drive', 'Contacts', 'Tasks'].every(p => linkHtml.includes(`<strong>${p}</strong>`)));
 
   const linkWrong = await fetch(`${BASE}/gmail/connect`, form({ password:'nope' }));
   check('link flow rejects wrong password', linkWrong.status === 401);
@@ -183,7 +221,11 @@ const check = (name, cond, extra='') => {
   const g = linkOk.headers.get('location') || '';
   check('link flow redirects to Google with offline access',
     g.startsWith('https://accounts.google.com/') && g.includes('access_type=offline') && g.includes('prompt=consent'));
-  check('requests gmail.modify scope', decodeURIComponent(g).includes('auth/gmail.modify'));
+  const scopes = decodeURIComponent(g);
+  check('requests gmail.modify scope', scopes.includes('auth/gmail.modify'));
+  check('requests the calendar, drive, contacts and tasks scopes',
+    ['auth/calendar', 'auth/drive', 'auth/contacts.readonly', 'auth/tasks'].every(sc => scopes.includes(sc)));
+  check('never requests the permanent-delete mail scope', !scopes.includes('mail.google.com'));
 
   const badState = await fetch(`${BASE}/gmail/oauth/callback?code=x&state=forged`);
   check('forged OAuth state rejected', badState.status === 400);

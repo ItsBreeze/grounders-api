@@ -12,7 +12,8 @@
     "test:tokens": "node test/token_separation.test.js",
     "test:query": "node test/gmail_query.test.js",
     "test:mime": "node test/gmail_mime.test.js",
-    "test:threads": "node test/gmail_threads.test.js"
+    "test:threads": "node test/gmail_threads.test.js",
+    "test:products": "node test/google_products.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

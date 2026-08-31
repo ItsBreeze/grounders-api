@@ -1,9 +1,11 @@
 /**
  * Thin Gmail REST v1 client.
  *
- * Deliberately dependency-free — Node's global fetch is enough, and pulling in
- * googleapis for these endpoints would be a large tree for no gain.
+ * Transport, URL building and the bounded-concurrency helper are shared with
+ * the Calendar, Drive, People and Tasks clients — see google_http.
  */
+
+const http = require('./google_http');
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -11,55 +13,10 @@ const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 // cannot swamp a conversation. The cut is flagged, never silent.
 const MAX_BODY_CHARS = 60000;
 
-// How many per-item detail fetches to have in flight at once. See mapLimit.
-const DETAIL_CONCURRENCY = 5;
+const { mapLimit, DETAIL_CONCURRENCY } = http;
 
-/**
- * Build a Gmail API URL.
- *
- * Array values become repeated parameters, not a comma-joined one: Gmail
- * expects metadataHeaders=From&metadataHeaders=Subject&… and silently returns
- * a message with no headers at all if given "From,Subject" as a single value.
- */
-function buildUrl(path, query) {
-  const url = new URL(`${BASE}${path}`);
-  if (!query) return url;
-
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') continue;
-
-    if (Array.isArray(value)) {
-      for (const item of value) url.searchParams.append(key, String(item));
-    } else {
-      url.searchParams.set(key, String(value));
-    }
-  }
-  return url;
-}
-
-async function call(accessToken, path, { method = 'GET', query, body } = {}) {
-  const url = buildUrl(path, query);
-
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-
-  if (!res.ok) {
-    const text   = await res.text().catch(() => '');
-    let   detail = `HTTP ${res.status}`;
-    try { detail = JSON.parse(text).error?.message || detail; } catch { /* keep status */ }
-    throw new Error(`Gmail API ${method} ${path}: ${detail}`);
-  }
-
-  if (res.status === 204) return null;
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
+const call     = http.clientFor('Gmail API', BASE);
+const buildUrl = call.url;
 
 const header = (msg, name) =>
   msg.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
@@ -152,27 +109,6 @@ function summarize(msg) {
     labels:    msg.labelIds || [],
     unread:    (msg.labelIds || []).includes('UNREAD'),
   };
-}
-
-/**
- * Async map with bounded concurrency.
- *
- * Gmail meters quota per user per second — a threads.get costs 10 units
- * against a 250/s ceiling — so firing 50 detail fetches at once buys 429s,
- * not speed.
- */
-async function mapLimit(items, limit, run) {
-  const out = new Array(items.length);
-  let next  = 0;
-
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++;
-      out[i] = await run(items[i]);
-    }
-  }));
-
-  return out;
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────────

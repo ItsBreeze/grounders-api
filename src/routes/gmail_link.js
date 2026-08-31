@@ -1,5 +1,5 @@
 /**
- * Mailbox linking flow — run once per Gmail account, in a browser.
+ * Account linking flow — run once per Google account, in a browser.
  *
  * Gated by the same operator password as the connector: anyone who could reach
  * /gmail/connect unprotected could attach their own mailbox to this server, or
@@ -46,10 +46,16 @@ function redirectUriInUse() {
   try { return google.config().redirectUri; } catch { return '(unavailable — check PUBLIC_BASE_URL)'; }
 }
 
-const passwordForm = (error) => page('Link a Gmail account', `
-  <h1>Link a Gmail account</h1>
+const passwordForm = (error) => page('Link a Google account', `
+  <h1>Link a Google account</h1>
   <p>Sign in with the operator password, then pick which Google account to link.
-     Repeat this once per mailbox.</p>
+     Repeat this once per account.</p>
+  <p>Linking grants this server <strong>Gmail</strong> (read, send, label, archive, trash —
+     never permanent delete), <strong>Calendar</strong> and <strong>Tasks</strong> (read and write),
+     <strong>Drive</strong> (read, create, edit, share, trash) and <strong>Contacts</strong>
+     (read only), for that account.</p>
+  <p>An account linked before a product was added holds an older grant. Linking it
+     again here adds the missing access and changes nothing else.</p>
   <p>This server will send Google the redirect URI below. It must appear
      <em>character for character</em> in your OAuth client's authorized redirect
      URIs, or consent fails with <code>redirect_uri_mismatch</code>.</p>

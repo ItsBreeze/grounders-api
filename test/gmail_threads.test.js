@@ -161,7 +161,7 @@ accountsModule.accessTokenFor = async (_owner, email) => {
   return `token-${email}`;
 };
 
-  const all = await tools.fanOut('owner', undefined, async (token, email) => ({ token, email }));
+  const all = await tools.fanOut('owner', undefined, 'gmail', async (token, email) => ({ token, email }));
   check('fan-out targets every linked mailbox', all.targets.length === 3, all.targets.join(','));
   check('a dead grant does not blank out the others', all.ok.length === 2, String(all.ok.length));
   check('the dead mailbox is named in errors',
@@ -169,15 +169,15 @@ accountsModule.accessTokenFor = async (_owner, email) => {
   check('each mailbox gets its own token',
     all.ok.every(r => r.value.token === `token-${r.email}`));
 
-  const one = await tools.fanOut('owner', 'two', async token => token);
+  const one = await tools.fanOut('owner', 'two', 'gmail', async token => token);
   check('naming an account narrows the fan-out', one.targets.length === 1 && one.targets[0] === 'two@x.com',
     one.targets.join(','));
 
   accountsModule.emailsFor = async () => [];
   let threw = '';
-  try { await tools.fanOut('owner', undefined, async () => 1); } catch (e) { threw = e.message; }
-  check('no mailboxes linked is an error, not an empty result',
-    threw.includes('No mailboxes are linked'), threw);
+  try { await tools.fanOut('owner', undefined, 'gmail', async () => 1); } catch (e) { threw = e.message; }
+  check('no accounts linked is an error, not an empty result',
+    threw.includes('No accounts are linked'), threw);
 
   console.log(fail ? `\n${fail} FAILED` : '\nthread search and fan-out correct');
   process.exit(fail ? 1 : 0);
