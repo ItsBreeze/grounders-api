@@ -18,6 +18,7 @@
     "test:extract": "node test/text_extract.test.js",
     "test:drive-parity": "node test/drive_parity.test.js",
     "test:reach": "node test/shared_drives_recurrence.test.js",
+    "test:ownership": "node test/ownership.test.js",
     "smoke": "node test/smoke_live.js"
   },
   "dependencies": {

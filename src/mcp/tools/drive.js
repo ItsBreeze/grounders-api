@@ -45,6 +45,57 @@ const SHARE_TARGET_PROPS = PUBLIC_SHARING
       email:  { type: 'string', description: 'Person to share with, by email address.' },
     };
 
+/**
+ * Writes land on files you own.
+ *
+ * A file owned by someone else — or by an organisation, which is every file in
+ * a shared drive — is not this connector's to change on a model's judgement.
+ * The default is therefore to work on a private copy, which answers "fix the
+ * typo in that spreadsheet" without touching the spreadsheet.
+ *
+ * The original is still reachable, because sometimes editing it is exactly what
+ * was asked for. It just cannot happen in one step: `edit_original` returns a
+ * draft of the change and applies nothing, and only a repeat with `confirm_edit`
+ * writes. The point is that a person sees the specific change before it lands,
+ * rather than being told afterwards which of their colleague's documents moved.
+ */
+async function resolveWrite(token, fileId, args, { copyable = false } = {}) {
+  const target = await drive.writeTarget(token, fileId);
+
+  if (target.owned_by_me)              return { target, mode: 'direct' };
+  if (args.confirm_edit)               return { target, mode: 'direct' };
+  if (copyable && !args.edit_original) return { target, mode: 'copy' };
+  return { target, mode: 'draft' };
+}
+
+/** The shape of every "nothing happened yet" answer, so they read alike. */
+const asDraft = (target, action, detail) => ({
+  applied: false,
+  status: 'DRAFT — nothing has been changed',
+  reason: `"${target.name}" belongs to ${drive.describeHolder(target)}, not to this account.`,
+  would: action,
+  ...detail,
+  to_apply: 'Show this to the user. If they approve, repeat the same call with confirm_edit: true.',
+});
+
+const OWNERSHIP_PROPS = {
+  confirm_edit: {
+    type: 'boolean',
+    description:
+      'The user has seen the draft of this change and approved it. Only ever set this after showing them ' +
+      'what the draft said — it is their approval, not yours.',
+  },
+};
+
+const EDIT_ORIGINAL_PROP = {
+  edit_original: {
+    type: 'boolean',
+    description:
+      "Act on someone else's file itself rather than on a private copy. Returns a draft of the change and " +
+      'writes nothing; repeat with confirm_edit: true once the user approves.',
+  },
+};
+
 const TOOLS = [
   {
     name: 'search_files',
@@ -279,7 +330,9 @@ const TOOLS = [
     description:
       'Rename a file, change its description, or move it between folders. ' +
       'Replacing the contents is possible but deliberately awkward: it needs BOTH `content` and ' +
-      'replace_content: true, so a rename can never overwrite a document by accident.',
+      'replace_content: true, so a rename can never overwrite a document by accident. ' +
+      'ON A FILE YOU DO NOT OWN this edits a private copy instead and tells you so; to change the ' +
+      'original, pass edit_original: true to get a draft, show it to the user, and only then confirm_edit.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -293,6 +346,8 @@ const TOOLS = [
         description:     { type: 'string' },
         add_parents:    { type: 'string', description: 'Folder id to move it into.' },
         remove_parents: { type: 'string', description: 'Folder id to move it out of.' },
+        ...EDIT_ORIGINAL_PROP,
+        ...OWNERSHIP_PROPS,
       },
       required: ['file_id'],
     },
@@ -308,7 +363,8 @@ const TOOLS = [
       }
 
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
-      const file = await drive.updateFile(token, args.file_id, {
+
+      const changes = {
         name:          args.name,
         content:       args.content,
         contentBase64: args.content_base64,
@@ -316,8 +372,38 @@ const TOOLS = [
         description:   args.description,
         addParents:    args.add_parents,
         removeParents: args.remove_parents,
+      };
+
+      const { target, mode } = await resolveWrite(token, args.file_id, args, { copyable: true });
+
+      if (mode === 'draft') {
+        return text(asDraft(target, `edit "${target.name}" itself`,
+          await drive.draftEdit(token, target, changes)));
+      }
+
+      if (mode === 'copy') {
+        const copy = await drive.copyToMyDrive(token, args.file_id, { name: args.name || `${target.name} (copy)` });
+        const file = await drive.updateFile(token, copy.id, { ...changes, name: undefined });
+
+        return text({
+          account: email,
+          updated: true,
+          edited_a_private_copy: true,
+          note: `"${target.name}" belongs to ${drive.describeHolder(target)}, so it was left untouched. ` +
+                'A copy was made in your My Drive and the change applied there. ' +
+                'To change the original instead, repeat with edit_original: true for a draft.',
+          original: { file_id: target.id, name: target.name, owners: target.owners },
+          ...file,
+        });
+      }
+
+      const file = await drive.updateFile(token, args.file_id, changes);
+      return text({
+        account: email,
+        updated: true,
+        ...(target.owned_by_me ? {} : { edited_someone_elses_file: drive.describeHolder(target) }),
+        ...file,
       });
-      return text({ account: email, updated: true, ...file });
     },
   },
 
@@ -369,6 +455,7 @@ const TOOLS = [
         role:    { type: 'string', enum: ROLES, description: 'Access level. Defaults to reader.' },
         notify:  { type: 'boolean', description: 'Email the person about it. Default false.' },
         message: { type: 'string', description: 'Note to include, when notify is true.' },
+        ...OWNERSHIP_PROPS,
       },
       required: ['file_id'],
     },
@@ -397,6 +484,18 @@ const TOOLS = [
       }
 
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+      const { target, mode } = await resolveWrite(token, args.file_id, args);
+
+      // Widening access to a document that is not yours is the case this guard
+      // exists for. Sharing a copy instead would spread their content further,
+      // not less, so there is no copy path — only a draft.
+      if (mode === 'draft') {
+        return text(asDraft(target,
+          `give ${args.email || args.domain || 'anyone with the link'} ${args.role || 'reader'} access to ` +
+          `"${target.name}", which you do not own`,
+          { file: { name: target.name, owners: target.owners, shared_drive_id: target.shared_drive_id } }));
+      }
+
       const permission = await drive.share(token, args.file_id, {
         email:  args.email,
         domain: args.domain,
@@ -485,10 +584,24 @@ const TOOLS = [
 
   {
     name: 'trash_file',
-    description: 'Move a file to the Drive trash, where it is recoverable for 30 days. Nothing here deletes permanently.',
-    inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP, ...FILE_PROP }, required: ['file_id'] },
+    description:
+      'Move a file to the Drive trash, where it is recoverable for 30 days. Nothing here deletes permanently. ' +
+      'On a file you do not own this returns a draft and removes nothing until confirm_edit is passed.',
+    inputSchema: {
+      type: 'object',
+      properties: { ...ACCOUNT_PROP, ...FILE_PROP, ...OWNERSHIP_PROPS },
+      required: ['file_id'],
+    },
     handler: async ({ ownerKey, args }) => {
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+      const { target, mode } = await resolveWrite(token, args.file_id, args);
+
+      // No copy path here: copying a file does not stand in for removing it.
+      if (mode === 'draft') {
+        return text(asDraft(target, `move "${target.name}" to the trash, removing it from everyone who uses it`,
+          { file: { name: target.name, owners: target.owners, shared_drive_id: target.shared_drive_id } }));
+      }
+
       const file = await drive.trashFile(token, args.file_id);
       return text({ account: email, ...file, status: 'moved to trash — recoverable for 30 days' });
     },

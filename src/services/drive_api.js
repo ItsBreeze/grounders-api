@@ -48,7 +48,7 @@ const MAX_TEXT_CHARS  = 60000;
 // Binary downloads have to fit in a tool result once base64-expanded.
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
 
-const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,iconLink,parents,trashed,shared,driveId,owners(emailAddress,displayName)';
+const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,iconLink,parents,trashed,shared,driveId,ownedByMe,owners(emailAddress,displayName)';
 
 const encode = (id) => encodeURIComponent(String(id));
 
@@ -118,6 +118,9 @@ function summarizeFile(file) {
     link:          file.webViewLink || null,
     // Only populated for items in a shared drive, so its absence means My Drive.
     shared_drive_id: file.driveId || null,
+    // False for everything in a shared drive, where the organisation owns the
+    // file rather than any person — see writeTarget.
+    owned_by_me:     Boolean(file.ownedByMe),
   };
 }
 
@@ -182,18 +185,71 @@ async function listDrives(accessToken, { maxResults = 100 } = {}) {
  * name a drive must never fail the search that found the files.
  */
 async function nameSharedDrives(accessToken, files) {
-  if (!files.some(f => f.shared_drive_id)) return files;
+  const wanted = [...new Set(files.map(f => f.shared_drive_id).filter(Boolean))];
+  if (!wanted.length) return files;
 
   const byId = new Map();
   try {
     for (const d of await listDrives(accessToken)) byId.set(d.id, d.name);
-  } catch {
-    return files;
+  } catch { /* fall through to the per-drive lookup */ }
+
+  // drives.list only returns drives this account is a MEMBER of, and a file can
+  // reach us from a drive we are not in — a folder shared directly, say. A
+  // shared drive's id is also its root folder's id, so asking for that folder
+  // names the drive where membership cannot.
+  const unnamed = wanted.filter(id => !byId.has(id));
+  if (unnamed.length) {
+    await http.mapLimit(unnamed, http.DETAIL_CONCURRENCY, async (id) => {
+      try {
+        const root = await call(accessToken, `/files/${encode(id)}`, { query: { fields: 'id,name' } });
+        if (root && root.name) byId.set(id, root.name);
+      } catch { /* an unnameable drive keeps its bare id, which is still true */ }
+    });
   }
 
   return files.map(f => (f.shared_drive_id && byId.has(f.shared_drive_id)
     ? { ...f, shared_drive: byId.get(f.shared_drive_id) }
     : f));
+}
+
+/** What a write needs to know about its target before touching it. */
+const WRITE_TARGET_FIELDS =
+  'id,name,mimeType,size,ownedByMe,driveId,trashed,owners(emailAddress,displayName),' +
+  'capabilities(canEdit,canShare,canDelete,canTrash)';
+
+/**
+ * The file a write is about to act on, described well enough to refuse.
+ *
+ * `ownedByMe` is the whole question. Note it is false for everything in a
+ * shared drive — including a file you created there — because a shared drive is
+ * owned by the organisation and not by any person. That is the correct reading
+ * for this purpose: those documents are colleagues' to lose.
+ */
+async function writeTarget(accessToken, fileId) {
+  const file = await call(accessToken, `/files/${encode(fileId)}`, { query: { fields: WRITE_TARGET_FIELDS } });
+  const can  = file.capabilities || {};
+
+  return {
+    id:              file.id,
+    name:            file.name,
+    mime_type:       file.mimeType,
+    size_bytes:      file.size ? Number(file.size) : null,
+    owned_by_me:     Boolean(file.ownedByMe),
+    shared_drive_id: file.driveId || null,
+    trashed:         Boolean(file.trashed),
+    owners:          (file.owners || []).map(o => o.emailAddress).filter(Boolean),
+    google_native:   String(file.mimeType || '').startsWith('application/vnd.google-apps'),
+    can_edit:        can.canEdit !== false,
+    can_share:       can.canShare !== false,
+    can_trash:       can.canTrash !== false,
+  };
+}
+
+/** Who to name in a refusal: the owner's address, or the shared drive it sits in. */
+function describeHolder(target) {
+  if (target.owners.length) return target.owners.join(', ');
+  if (target.shared_drive_id) return 'a shared drive, which belongs to the organisation rather than to a person';
+  return 'someone else';
 }
 
 async function getMetadata(accessToken, fileId) {
@@ -397,6 +453,101 @@ async function copyFile(accessToken, fileId, { name, parents }) {
   return summarizeFile(file);
 }
 
+/**
+ * Copy a file into My Drive, so it can be worked on without touching the original.
+ *
+ * `parents: ['root']` is the whole point and not a detail: files.copy with no
+ * parent puts the copy beside the source, which for a shared-drive file means
+ * the copy lands in that same shared drive — still the organisation's, still
+ * not private. Naming the user's own root is what makes it theirs.
+ */
+async function copyToMyDrive(accessToken, fileId, { name } = {}) {
+  const file = await call(accessToken, `/files/${encode(fileId)}/copy`, {
+    method: 'POST',
+    query:  { fields: FILE_FIELDS },
+    body:   { ...(name ? { name } : {}), parents: ['root'] },
+  });
+  return summarizeFile(file);
+}
+
+/**
+ * The lines that actually differ between two texts.
+ *
+ * Deliberately not a diff algorithm: trimming the common head and the common
+ * tail leaves exactly the region that changed, which is all a person approving
+ * an edit needs to see, and it cannot mis-align the way a bad LCS can. One
+ * changed line in a thousand shows as one changed line.
+ */
+function changedLines(before, after, { max = 12 } = {}) {
+  const a = String(before).split('\n');
+  const b = String(after).split('\n');
+
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+
+  let tail = 0;
+  while (tail < a.length - head && tail < b.length - head
+         && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+
+  const removed = a.slice(head, a.length - tail);
+  const added   = b.slice(head, b.length - tail);
+
+  return {
+    unchanged_before: head,
+    unchanged_after:  tail,
+    removed: removed.slice(0, max),
+    added:   added.slice(0, max),
+    ...(removed.length > max ? { removed_not_shown: removed.length - max } : {}),
+    ...(added.length   > max ? { added_not_shown:   added.length - max }   : {}),
+  };
+}
+
+/**
+ * What a write would do, in enough detail to be approved or refused.
+ *
+ * Read-only: it describes the change without making it. For a content
+ * replacement it fetches what is there now so the draft can show the actual
+ * difference rather than only the new text — being told "this will overwrite
+ * 40 KB" is not the same as seeing which line moves.
+ */
+async function draftEdit(accessToken, target, changes) {
+  const fields = [];
+
+  if (changes.name !== undefined && changes.name !== target.name) {
+    fields.push({ field: 'name', from: target.name, to: changes.name });
+  }
+  if (changes.description !== undefined) fields.push({ field: 'description', to: changes.description });
+  if (changes.addParents)    fields.push({ field: 'moved into folder', to: changes.addParents });
+  if (changes.removeParents) fields.push({ field: 'moved out of folder', to: changes.removeParents });
+
+  const replacing = changes.content !== undefined || changes.contentBase64 !== undefined;
+  if (!replacing) return { changes: fields };
+
+  const bytes = changes.contentBase64 !== undefined
+    ? Buffer.from(changes.contentBase64, 'base64')
+    : Buffer.from(String(changes.content), 'utf8');
+
+  const content = {
+    replacing_contents: true,
+    size_now:   target.size_bytes,
+    size_after: bytes.length,
+  };
+
+  // Binary replacements cannot be shown as a diff; say so rather than pretending.
+  if (changes.contentBase64 !== undefined) {
+    return { changes: fields, content: { ...content, note: 'Binary content — no line-level preview is possible.' } };
+  }
+
+  try {
+    const current = await getContent(accessToken, target.id);
+    content.diff = changedLines(truncateText(current.data.toString('utf8')), String(changes.content));
+  } catch (e) {
+    content.note = `Could not read the current contents to compare: ${e.message}`;
+  }
+
+  return { changes: fields, content };
+}
+
 async function listPermissions(accessToken, fileId) {
   const res = await call(accessToken, `/files/${encode(fileId)}/permissions`, {
     query: { fields: 'permissions(id,type,role,emailAddress,domain,displayName,deleted)' },
@@ -535,6 +686,7 @@ module.exports = {
   searchFiles, listRecent, getMetadata, getContent, createFile, updateFile,
   copyFile, listPermissions, share, unshare, trashFile, untrashFile, ocrViaConversion,
   listComments, addComment, listDrives, nameSharedDrives,
+  writeTarget, copyToMyDrive, draftEdit, describeHolder,
   MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS, EXPORT_FORMATS, GOOGLE_TYPES,
-  _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText, ALL_DRIVES_PATH },
+  _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText, ALL_DRIVES_PATH, changedLines },
 };
