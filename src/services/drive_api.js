@@ -165,16 +165,25 @@ const listRecent = (accessToken, { maxResults = 10, pageToken, driveId } = {}) =
  * why a personal-Drive-only connector loses the company's documents.
  */
 async function listDrives(accessToken, { maxResults = 100 } = {}) {
-  const res = await call(accessToken, '/drives', {
-    query: { pageSize: Math.min(Math.max(maxResults, 1), 100), fields: 'drives(id,name,createdTime,hidden)' },
-  });
+  const wanted = Math.max(maxResults, 1);
+  const drives = [];
+  let pageToken;
 
-  return (res.drives || []).map(d => ({
-    id:      d.id,
-    name:    d.name,
-    created: d.createdTime || null,
-    hidden:  Boolean(d.hidden),
-  }));
+  // Pages rather than stopping at the 100 Drive returns per call: an account in
+  // more shared drives than that would otherwise have the overflow silently
+  // unnameable, which looks identical to not being a member.
+  do {
+    const res = await call(accessToken, '/drives', {
+      query: { pageSize: Math.min(wanted - drives.length, 100), pageToken, fields: 'nextPageToken,drives(id,name,createdTime,hidden)' },
+    });
+
+    for (const d of res.drives || []) {
+      drives.push({ id: d.id, name: d.name, created: d.createdTime || null, hidden: Boolean(d.hidden) });
+    }
+    pageToken = res.nextPageToken;
+  } while (pageToken && drives.length < wanted);
+
+  return drives;
 }
 
 /**
@@ -191,25 +200,22 @@ async function nameSharedDrives(accessToken, files) {
   const byId = new Map();
   try {
     for (const d of await listDrives(accessToken)) byId.set(d.id, d.name);
-  } catch { /* fall through to the per-drive lookup */ }
-
-  // drives.list only returns drives this account is a MEMBER of, and a file can
-  // reach us from a drive we are not in — a folder shared directly, say. A
-  // shared drive's id is also its root folder's id, so asking for that folder
-  // names the drive where membership cannot.
-  const unnamed = wanted.filter(id => !byId.has(id));
-  if (unnamed.length) {
-    await http.mapLimit(unnamed, http.DETAIL_CONCURRENCY, async (id) => {
-      try {
-        const root = await call(accessToken, `/files/${encode(id)}`, { query: { fields: 'id,name' } });
-        if (root && root.name) byId.set(id, root.name);
-      } catch { /* an unnameable drive keeps its bare id, which is still true */ }
-    });
+  } catch {
+    return files;
   }
 
-  return files.map(f => (f.shared_drive_id && byId.has(f.shared_drive_id)
-    ? { ...f, shared_drive: byId.get(f.shared_drive_id) }
-    : f));
+  // A drive.list only covers drives this account is a MEMBER of, and a file can
+  // reach us from a drive we are not in — through a folder shared directly.
+  // There is no way to name such a drive: its id is also its root folder's id,
+  // but reaching a file inside it grants nothing on that root, so asking for it
+  // answers "File not found". Rather than a bare id that looks like a failure,
+  // the result says which it is.
+  return files.map((f) => {
+    if (!f.shared_drive_id) return f;
+    return byId.has(f.shared_drive_id)
+      ? { ...f, shared_drive: byId.get(f.shared_drive_id) }
+      : { ...f, shared_drive_member: false };
+  });
 }
 
 /** What a write needs to know about its target before touching it. */

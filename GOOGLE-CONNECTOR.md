@@ -124,11 +124,18 @@ previously unreachable by `update_file`, `share_file` or `trash_file`, and now i
 Since a shared drive holds an organisation's documents rather than one person's,
 that is exactly the case the ownership rule below exists for.
 
-A drive is named wherever it can be. `drives.list` covers the drives this account
-is a **member** of; a file can also reach you from a drive you are not in, via a
-folder shared directly. A shared drive's id is also its root folder's id, so
-asking for that folder names the drive where membership cannot. A drive that
-resists both keeps its bare id, which is still true.
+A drive is named where it can be, and says so where it cannot. `drives.list`
+covers the drives this account is a **member** of, paged rather than cut off at
+Drive's hundred-per-call — an account in more drives than that would otherwise
+have the overflow look like non-membership.
+
+A file can also reach you from a drive you are *not* in, through a folder shared
+directly. Such a drive cannot be named at all. Its id is also its root folder's
+id, but reaching a file inside a drive grants nothing on the root folder above
+it, so asking answers `File not found` — verified against a real Workspace
+account, where two of three drives holding recent files were reached this way.
+Those carry `shared_drive_member: false` rather than a bare id, so "no name
+available" is distinguishable from "lookup failed".
 
 ## Writes land on files you own
 
@@ -273,7 +280,7 @@ results.
 
 ## Tests
 
-Eleven suites, all plain Node — no framework, no new dependencies. 433 checks.
+Eleven suites, all plain Node — no framework, no new dependencies. 435 checks.
 
 ```bash
 # No database, no network:

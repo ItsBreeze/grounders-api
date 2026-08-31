@@ -166,26 +166,37 @@ const writes = seen => seen.filter(r => r.method !== 'GET');
   seen = [];
   global.fetch = async (url) => {
     const parsed = new URL(String(url));
-    seen.push(parsed.pathname);
-    if (parsed.pathname.endsWith('/drives')) return { ok: true, status: 200, text: async () => JSON.stringify({ drives: [{ id: 'D1', name: 'Taproom' }] }) };
-    return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'D2', name: 'Production' }) };
+    seen.push(parsed.pathname + '?' + parsed.searchParams.get('pageToken'));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ drives: [{ id: 'D1', name: 'Taproom' }] }) };
   };
 
   const named = await drive.nameSharedDrives('tok', [
     { id: 'a', shared_drive_id: 'D1' },
     { id: 'b', shared_drive_id: 'D2' },
   ]);
-  check('a drive you are a member of is named from the membership list', named[0].shared_drive === 'Taproom');
-  check('one you are NOT a member of is named from its root folder', named[1].shared_drive === 'Production', JSON.stringify(named[1]));
-  check('the fallback asks only about the drive it could not name',
-    seen.filter(p => p.includes('/files/')).length === 1, seen.join(', '));
+  check('a drive you are a member of is named', named[0].shared_drive === 'Taproom');
+  check('one you are not a member of says so, rather than showing a bare id',
+    named[1].shared_drive_member === false && named[1].shared_drive === undefined, JSON.stringify(named[1]));
+  check('and it keeps the id, which is still true', named[1].shared_drive_id === 'D2');
+  check('naming never asks about a drive it cannot read — that answers "File not found"',
+    !seen.some(p => p.includes('/files/')), seen.join(', '));
 
-  global.fetch = async (url) => (String(url).endsWith('/drives')
-    ? { ok: true, status: 200, text: async () => JSON.stringify({ drives: [] }) }
-    : { ok: false, status: 404, text: async () => '{"error":{"message":"not found"}}' });
+  // Membership beyond one page must not look like non-membership.
+  let page = 0;
+  global.fetch = async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(page++ === 0
+      ? { drives: [{ id: 'D1', name: 'First' }], nextPageToken: 'p2' }
+      : { drives: [{ id: 'D2', name: 'Hundred and first' }] }),
+  });
+  const paged = await drive.nameSharedDrives('tok', [{ id: 'b', shared_drive_id: 'D2' }]);
+  check('a drive past the first page of memberships is still named',
+    paged[0].shared_drive === 'Hundred and first', JSON.stringify(paged[0]));
+
+  global.fetch = async () => ({ ok: false, status: 403, text: async () => '{"error":{"message":"nope"}}' });
   const stubborn = await drive.nameSharedDrives('tok', [{ id: 'a', shared_drive_id: 'D3' }]);
-  check('a drive that cannot be named keeps its id rather than failing the search',
-    stubborn[0].shared_drive === undefined && stubborn[0].shared_drive_id === 'D3');
+  check('failing to list drives never fails the search that found the files',
+    stubborn[0].shared_drive_id === 'D3' && stubborn[0].id === 'a');
 
   console.log(fail ? `\n${fail} FAILED` : '\nwrites stay on files you own');
   process.exit(fail ? 1 : 0);
