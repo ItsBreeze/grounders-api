@@ -123,7 +123,7 @@ const check = (name, cond, extra='') => {
 
   const list = await rpc({jsonrpc:'2.0', id:2, method:'tools/list'});
   const names = (list.json?.result?.tools || []).map(t => t.name);
-  check('tools/list returns 53 tools', names.length === 53, `got ${names.length}`);
+  check('tools/list returns 54 tools', names.length === 54, `got ${names.length}`);
   for (const required of [
     'search_messages','search_threads','create_draft','get_attachment','forward_message','untrash_message','mark_spam',
     'list_calendars','list_events','search_events','create_event','respond_to_event','suggest_time',
