@@ -78,6 +78,58 @@ router.post('/connect', express.urlencoded({ extended: false }), (req, res, next
   }
 });
 
+/**
+ * Credential self-check — verifies GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+ * against Google without running a full consent round-trip. Password-gated
+ * because it reports on configuration.
+ */
+const checkForm = (error) => page('Check credentials', `
+  <h1>Check Google credentials</h1>
+  <p>Verifies the client ID and secret against Google without linking anything.</p>
+  ${error ? `<div class="err">${escapeHtml(error)}</div>` : ''}
+  <form method="POST" action="/gmail/check">
+    <input type="password" name="password" placeholder="Operator password" autofocus required autocomplete="current-password">
+    <button type="submit">Run check</button>
+  </form>`);
+
+router.get('/check', (req, res) => res.type('html').send(checkForm(null)));
+
+router.post('/check', express.urlencoded({ extended: false }), async (req, res, next) => {
+  try {
+    if (!oauth.checkAdminPassword(req.body?.password)) {
+      return res.status(401).type('html').send(checkForm('Incorrect password.'));
+    }
+
+    const clientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+    const secret   = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+    const result   = await google.verifyCredentials();
+
+    // Shape checks catch the common paste mistakes before Google even matters.
+    const notes = [];
+    if (!clientId.endsWith('.apps.googleusercontent.com')) {
+      notes.push('GOOGLE_CLIENT_ID does not end in .apps.googleusercontent.com — wrong value or a pasted "KEY=" prefix.');
+    }
+    if (!secret.startsWith('GOCSPX-')) {
+      notes.push('GOOGLE_CLIENT_SECRET does not start with GOCSPX- — wrong value or a pasted "KEY=" prefix.');
+    }
+    if (/^GOOGLE_CLIENT_(ID|SECRET)=/.test(clientId) || /^GOOGLE_CLIENT_(ID|SECRET)=/.test(secret)) {
+      notes.push('A variable still contains its own name — store only the value.');
+    }
+
+    res.type('html').send(page('Credential check', `
+      <h1>${result.ok ? '<span class="ok">✓</span> Credentials accepted' : 'Credentials rejected'}</h1>
+      <p>${escapeHtml(result.detail)}</p>
+      ${result.culprit ? `<p class="err">Fix <code>${escapeHtml(result.culprit)}</code> in your host's environment.</p>` : ''}
+      ${notes.length ? `<ul>${notes.map(n => `<li class="err">${escapeHtml(n)}</li>`).join('')}</ul>` : ''}
+      <p>Client ID: <code>${escapeHtml(clientId || '(unset)')}</code></p>
+      <p>Secret: <code>${secret ? `${secret.length} chars, starts "${escapeHtml(secret.slice(0, 7))}…"` : '(unset)'}</code></p>
+      <p>Redirect URI: <code>${escapeHtml(redirectUriInUse())}</code></p>
+      <a class="btn" href="/gmail/connect">Back to linking</a>`));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/oauth/callback', async (req, res, next) => {
   try {
     if (req.query.error) {
