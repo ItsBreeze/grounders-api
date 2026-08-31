@@ -183,18 +183,17 @@ vars. Delete the routes and the migration block to remove it entirely.
 | GET | `/gmail/connect` | Link a mailbox (repeat per account) |
 | POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
 
-### Tools
+### Tools (22)
 
-| Tool | Notes |
-|------|-------|
-| `list_accounts` | Which mailboxes are linked |
-| `search_messages` | Gmail query syntax. **Omit `account` to search every mailbox** |
-| `get_message` / `get_thread` | Full bodies, HTML flattened to text |
-| `send_message` | `account` picks the From address |
-| `reply_to_message` | Threads correctly via `In-Reply-To`/`References` |
-| `modify_labels` | Removing `INBOX` archives |
-| `trash_message` | Recoverable for 30 days |
-| `list_labels` | Label ids for `modify_labels` |
+| Area | Tools | Notes |
+|------|-------|-------|
+| Accounts | `list_accounts` | Which mailboxes are linked, with token health |
+| Search | `search_messages` | Gmail query syntax. **Omit `account` to search every mailbox**, merged and date-sorted. Per-mailbox `page_token` pagination |
+| Read | `get_message`, `get_thread`, `get_attachment` | Bodies flattened to text and capped at 60 KB; attachment metadata included; `get_attachment` returns text files as text, binaries as base64 (2 MB cap) |
+| Send | `send_message`, `reply_to_message`, `forward_message` | Replies thread via `In-Reply-To`/`References`; forwards carry attachments (10 MB cap, skipped ones named) |
+| Drafts | `create_draft`, `list_drafts`, `get_draft`, `update_draft`, `send_draft`, `delete_draft` | `create_draft` with `reply_to_message_id` drafts an in-thread reply for review — the safe path for AI-written mail |
+| Labels | `modify_labels`, `list_labels`, `create_label`, `update_label`, `delete_label` | `modify_labels` takes `message_id` or `thread_id`; removing `INBOX` archives |
+| Trash & spam | `trash_message`, `untrash_message`, `mark_spam` | All take `message_id` or `thread_id`; trash is recoverable for 30 days; `mark_spam` with `unmark: true` restores |
 
 ### Setup
 
