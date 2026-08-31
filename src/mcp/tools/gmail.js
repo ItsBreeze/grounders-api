@@ -7,6 +7,7 @@
 
 const accounts = require('../../services/gmail_accounts');
 const gmail    = require('../../services/gmail_api');
+const extract  = require('../../services/text_extract');
 const {
   text, resolveAccount, tokenFor, fanOut, mergeSearch, oneTarget,
   ACCOUNT_PROP, SEARCH_PROPS, checkPageToken,
@@ -119,8 +120,9 @@ const TOOLS = [
   {
     name: 'get_attachment',
     description:
-      'Download one attachment from a message. Text-like files (text/*, JSON, CSV, XML) come back as text; ' +
-      'binary files come back base64-encoded (2 MB limit). Get attachment ids from get_message or get_thread.',
+      'Read one attachment. PDFs, Word, Excel, PowerPoint, OpenDocument and text-like files come back as ' +
+      'TEXT, so an emailed contract or invoice can be read directly; anything else comes back base64-encoded ' +
+      '(2 MB limit). Get attachment ids from get_message or get_thread.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -144,16 +146,27 @@ const TOOLS = [
       const meta = msg.attachments.find(a => a.attachment_id === args.attachment_id) || {};
       const mime = meta.mime_type || 'application/octet-stream';
 
-      const textLike = /^text\/|[/+](json|csv|xml)$|^application\/(json|xml|csv)/.test(mime);
+      const filename = meta.filename || '(unknown)';
+      const result   = extract.extract(data, { mimeType: mime, filename });
 
       return text({
         account:    email,
-        filename:   meta.filename || '(unknown)',
+        filename,
         mime_type:  mime,
         size_bytes: data.length,
-        ...(textLike
-          ? { text: data.toString('utf8') }
-          : { base64: data.toString('base64'), note: 'Binary content, base64-encoded.' }),
+        ...(result.text !== null
+          ? {
+              ...(result.kind !== 'text' ? { read_as: result.kind } : {}),
+              ...(result.pages ? { pages: result.pages } : {}),
+              text: gmail._internal.truncateBody(result.text),
+            }
+          : {
+              base64: data.toString('base64'),
+              note: `Returned as base64 because the text could not be read: ${result.reason}` +
+                    (result.recoverable
+                      ? ' Saving it to Drive and reading it with ocr: true would extract the text.'
+                      : ''),
+            }),
       });
     },
   },

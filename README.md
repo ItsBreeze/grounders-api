@@ -197,7 +197,7 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 |------|-------|-------|
 | Accounts | `list_accounts` | Which accounts are linked, with token health |
 | Search | `search_messages`, `search_threads` | Gmail query syntax, merged and date-sorted across accounts. `search_threads` returns one row per conversation — subject, every participant, message and unread counts, last activity — for "where does my thread with X stand" without pulling bodies |
-| Read | `get_message`, `get_thread`, `get_attachment` | Bodies flattened to text and capped at 60 KB; attachment metadata included; `get_attachment` returns text files as text, binaries as base64 (2 MB cap) |
+| Read | `get_message`, `get_thread`, `get_attachment` | Bodies flattened to text and capped at 60 KB; attachment metadata included. **`get_attachment` extracts text from PDF, Word, Excel, PowerPoint and OpenDocument attachments**, so an emailed contract or invoice is readable directly; anything else comes back base64 (2 MB cap) |
 | Send | `send_message`, `reply_to_message`, `forward_message` | Replies thread via `In-Reply-To`/`References`; forwards carry attachments (10 MB cap, skipped ones named) |
 | Drafts | `create_draft`, `list_drafts`, `get_draft`, `update_draft`, `send_draft`, `delete_draft` | `create_draft` with `reply_to_message_id` drafts an in-thread reply for review — the safe path for AI-written mail |
 | Labels | `modify_labels`, `list_labels`, `create_label`, `update_label`, `delete_label` | `modify_labels` takes `message_id` or `thread_id`; removing `INBOX` archives |
@@ -217,7 +217,7 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 | Area | Tools | Notes |
 |------|-------|-------|
 | Find | `search_files`, `list_recent_files`, `get_file_metadata` | Text search over names and contents, with optional raw Drive query syntax in `filter`. Trashed files excluded unless you ask for them |
-| Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides are exported (Sheets as CSV); text caps at 60 KB, binaries at 2 MB base64 |
+| Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides exported (Sheets as CSV); **PDF, Word, Excel, PowerPoint and OpenDocument extracted to text**; `ocr: true` routes scans and images through Google's own conversion. Text caps at 60 KB, binaries at 2 MB base64 |
 | Write | `create_file`, `update_file`, `copy_file` | Text content in, folders via `parents`. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
 | Sharing | `get_file_permissions`, `share_file`, `unshare_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true`, and then still need `confirm_public`. **`unshare_file` withdraws access** — by person, by domain, or by removing the public link |
 | Remove | `trash_file`, `untrash_file` | Trash and restore, within the 30-day window — see the scope note below |
@@ -228,6 +228,36 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 |------|-------|-------|
 | Contacts | `search_contacts`, `list_contacts` | Read-only. Searches saved contacts **and** people the account has corresponded with, so "email Ann" resolves to an address instead of a guess |
 | Tasks | `list_task_lists`, `list_tasks`, `create_task`, `update_task`, `delete_task` | `list_id` defaults to the account's first list. `update_task` with `completed: true` ticks a task off; `false` reopens it. Google Tasks has no trash, so `delete_task` is permanent |
+
+### Document text extraction
+
+`read_file_content` and `get_attachment` both return text for PDF, Word, Excel,
+PowerPoint and OpenDocument files, using only Node's standard library — no
+parsing dependency to vendor, audit or keep current.
+
+| Format | How | Notes |
+|--------|-----|-------|
+| .docx / .odt | ZIP + XML | Paragraphs, tabs and line breaks preserved; styles and revision marks dropped |
+| .xlsx / .ods | ZIP + XML | One CSV block per sheet, named from the workbook relationships. Cells are placed by column letter, so a gap stays a gap |
+| .pptx / .odp | ZIP + XML | One block per slide, in presentation order |
+| .pdf | Content-stream parsing | Flate, ASCII85 and ASCIIHex filter chains; literal, hex and octal strings; positioning operators become line breaks |
+
+**Where it stops, and what happens then.** Two kinds of PDF have no text to
+extract: a scan, which is a picture of a page, and one whose fonts are CID-keyed
+or subset, where the bytes in the content stream are glyph numbers that need the
+font's own tables to become letters. Both would decode into confident-looking
+nonsense, so the result is scored for readability and **refused** rather than
+returned — the refusal names the cause and points at the fix.
+
+That fix is `ocr: true` on `read_file_content`, which copies the file as a Google
+Doc (Drive runs OCR during that conversion), exports the text, and deletes the
+copy in a `finally` block. It reads scans, photographs and images. Two things
+worth knowing: it is the one place this server writes to Drive during a read, and
+that delete is the only permanent delete in the whole server — its target is a
+file created seconds earlier by that same call, never anything the user put
+there. If the cleanup itself fails, the result says so and names the file.
+
+Extraction is capped at 60 KB like every other body, with the cut flagged.
 
 ### Setup
 
@@ -298,6 +328,9 @@ src/services/calendar_api.js    shaped results rather than raw payloads
 src/services/drive_api.js
 src/services/people_api.js
 src/services/tasks_api.js
+src/services/office_text.js     .docx/.xlsx/.pptx/.odt text, via a ZIP reader
+src/services/pdf_text.js        PDF content-stream text, with a readability guard
+src/services/text_extract.js    one entry point both Drive and Gmail read through
 src/services/gmail_accounts.js  linked accounts, token refresh, scope gating
 src/mcp/shared.js               resolveAccount / tokenFor / fanOut / mergeSearch
 src/mcp/tools/                  one module per product, assembled by index.js
@@ -310,7 +343,7 @@ results.
 
 ### Tests
 
-Seven suites, all plain Node — no framework, no new dependencies. 242 checks.
+Eight suites, all plain Node — no framework, no new dependencies. 303 checks.
 
 ```bash
 # No database, no network:
@@ -321,6 +354,7 @@ npm run test:threads    # address parsing, thread summaries, cross-account fan-o
 npm run test:products   # free-slot arithmetic, Drive query quoting, multipart
                         # upload framing, task dates, scope gating, tool-surface shape
 npm run test:drive-safety   # the sharing and overwrite guards, both env states
+npm run test:extract    # PDF and Office text extraction, against real fixtures
 
 # Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest

@@ -119,6 +119,51 @@ async function getContent(accessToken, fileId) {
   return { meta, data, mimeType: asText || meta.mime_type, exported: Boolean(asText) };
 }
 
+/**
+ * Text from a file Google can convert but this server cannot read locally —
+ * a scan, an image, or a PDF whose fonts hide the characters.
+ *
+ * Drive converts to a Google Doc on copy, and that conversion runs Google's own
+ * OCR. There is no read-only way to ask for it, so this makes a temporary copy,
+ * exports its text, and deletes the copy in a finally block.
+ *
+ * That delete is permanent rather than a trash, and it is the only permanent
+ * delete anywhere in this server: its target is a file created seconds earlier
+ * by this function, never anything the user put there. If the cleanup itself
+ * fails, the id comes back so the caller can say what was left behind.
+ */
+async function ocrViaConversion(accessToken, fileId) {
+  const source = await getMetadata(accessToken, fileId);
+
+  const copy = await call(accessToken, `/files/${encode(fileId)}/copy`, {
+    method: 'POST',
+    query:  { fields: 'id,name' },
+    body:   { name: `[temporary OCR copy] ${source.name}`, mimeType: 'application/vnd.google-apps.document' },
+  });
+
+  let text;
+  try {
+    const data = await call(accessToken, `/files/${encode(copy.id)}/export`, {
+      query: { mimeType: 'text/plain' },
+      raw:   true,
+    });
+    text = data.toString('utf8');
+  } finally {
+    // The copy must not outlive this call, whether the export worked or not.
+    // Cleanup failure is reported rather than thrown: it must not mask an
+    // export error, and it must not turn a successful read into a failure.
+    var orphaned = await call(accessToken, `/files/${encode(copy.id)}`, { method: 'DELETE' })
+      .then(() => null, () => copy.id);
+  }
+
+  return {
+    name: source.name,
+    text,
+    source_mime_type: source.mime_type,
+    ...(orphaned ? { orphaned_copy: orphaned } : {}),
+  };
+}
+
 function truncateText(value) {
   return value.length <= MAX_TEXT_CHARS
     ? value
@@ -283,7 +328,7 @@ async function trashFile(accessToken, fileId) {
 
 module.exports = {
   searchFiles, listRecent, getMetadata, getContent, createFile, updateFile,
-  copyFile, listPermissions, share, unshare, trashFile, untrashFile,
+  copyFile, listPermissions, share, unshare, trashFile, untrashFile, ocrViaConversion,
   MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS,
   _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText },
 };

@@ -5,7 +5,8 @@
  * and a work Drive at the same time. Writes always name one account.
  */
 
-const drive = require('../../services/drive_api');
+const drive   = require('../../services/drive_api');
+const extract = require('../../services/text_extract');
 const {
   text, tokenFor, fanOut, mergeSearch, ACCOUNT_PROP, SEARCH_PROPS, checkPageToken,
 } = require('../shared');
@@ -94,18 +95,47 @@ const TOOLS = [
   {
     name: 'read_file_content',
     description:
-      'Read a file as text. Google Docs, Sheets and Slides are exported (Sheets as CSV), and plain text, ' +
-      'Markdown, JSON, CSV and code come back as-is. Capped at 60 KB with the cut flagged. ' +
-      'For a PDF or an image, use download_file_content.',
-    inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP, ...FILE_PROP }, required: ['file_id'] },
+      'Read a file as text. Handles Google Docs, Sheets and Slides (exported, Sheets as CSV), ' +
+      'PDFs, Word, Excel, PowerPoint and OpenDocument files, and plain text, Markdown, JSON, CSV and code. ' +
+      'Capped at 60 KB with the cut flagged. If a PDF turns out to be a scan, or an image needs reading, ' +
+      'retry with ocr: true — that routes it through Google\'s own conversion.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...ACCOUNT_PROP,
+        ...FILE_PROP,
+        ocr: {
+          type: 'boolean',
+          description: 'Read via Google conversion, which OCRs scans and images. Makes a temporary copy in ' +
+                       'the account\'s Drive and deletes it afterwards. Use when a normal read reports no text layer.',
+        },
+      },
+      required: ['file_id'],
+    },
     handler: async ({ ownerKey, args }) => {
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
-      const { meta, data, mimeType, exported } = await drive.getContent(token, args.file_id);
 
-      const textLike = /^text\/|[/+](json|csv|xml|javascript)$|^application\/(json|xml|csv|x-sh)/.test(mimeType);
-      if (!textLike) {
+      if (args.ocr) {
+        const converted = await drive.ocrViaConversion(token, args.file_id);
+        return text({
+          account: email,
+          name: converted.name,
+          mime_type: converted.source_mime_type,
+          read_via: 'Google Drive conversion (OCR)',
+          ...(converted.orphaned_copy
+            ? { warning: `The temporary copy ${converted.orphaned_copy} could not be deleted — remove it manually.` }
+            : {}),
+          content: drive._internal.truncateText(converted.text || ''),
+        });
+      }
+
+      const { meta, data, mimeType, exported } = await drive.getContent(token, args.file_id);
+      const result = extract.extract(data, { mimeType, filename: meta.name });
+
+      if (result.text === null) {
         throw new Error(
-          `"${meta.name}" is ${mimeType}, which is not text. Use download_file_content to get it base64-encoded.`,
+          `"${meta.name}": ${result.reason}` +
+          (result.recoverable ? '' : ' Use download_file_content to get the raw bytes instead.'),
         );
       }
 
@@ -114,7 +144,9 @@ const TOOLS = [
         name: meta.name,
         mime_type: mimeType,
         ...(exported ? { exported_from: meta.mime_type } : {}),
-        content: drive._internal.truncateText(data.toString('utf8')),
+        ...(result.kind !== 'text' ? { read_as: result.kind } : {}),
+        ...(result.pages ? { pages: result.pages } : {}),
+        content: drive._internal.truncateText(result.text),
       });
     },
   },
