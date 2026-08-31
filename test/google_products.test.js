@@ -246,7 +246,7 @@ check('every required property is actually declared',
 check('descriptors expose no handlers',
   surface.descriptors().every(d => d.handler === undefined && d.name && d.inputSchema));
 
-for (const [product, count] of [['calendar', 9], ['drive', 14], ['contacts', 2], ['tasks', 5], ['gmail', 23]]) {
+for (const [product, count] of [['calendar', 9], ['drive', 15], ['contacts', 2], ['tasks', 5], ['gmail', 23]]) {
   check(`${product} module has ${count} tools`,
     surface._internal.MODULES[product].length === count,
     String(surface._internal.MODULES[product].length));

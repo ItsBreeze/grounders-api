@@ -11,15 +11,44 @@ const http = require('./google_http');
 const BASE   = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 
-const call   = http.clientFor('Drive API', BASE);
-const upload = http.clientFor('Drive upload', UPLOAD);
+const rawCall   = http.clientFor('Drive API', BASE);
+const rawUpload = http.clientFor('Drive upload', UPLOAD);
+
+/**
+ * Which paths take `supportsAllDrives`, from the v3 discovery document: every
+ * files.* method except export, and every permissions.* method. Comments,
+ * replies and export do not take it.
+ *
+ * Matches `/files`, `/files/{id}`, `/files/{id}/copy` and
+ * `/files/{id}/permissions[/{id}]` — and deliberately not
+ * `/files/{id}/export` or `/files/{id}/comments...`.
+ */
+const ALL_DRIVES_PATH = /^\/files(?:\/[^/]+)?$|^\/files\/[^/]+\/(?:copy|permissions)(?:\/|$)/;
+
+/**
+ * Every Drive request that can carry `supportsAllDrives` does.
+ *
+ * Without it, a file living in a shared drive is not merely filtered out of
+ * searches — a request naming its id comes back 404 "File not found", which
+ * reads as a wrong id rather than a missing capability. Applying it here, once,
+ * rather than at each of the eighteen call sites, is what stops the next
+ * endpoint added below from silently reintroducing that.
+ */
+function supportingAllDrives(client) {
+  return (accessToken, path, opts = {}) => (ALL_DRIVES_PATH.test(path)
+    ? client(accessToken, path, { ...opts, query: { ...opts.query, supportsAllDrives: 'true' } })
+    : client(accessToken, path, opts));
+}
+
+const call   = supportingAllDrives(rawCall);
+const upload = supportingAllDrives(rawUpload);
 
 // Text pulled out of a document is capped like a mail body.
 const MAX_TEXT_CHARS  = 60000;
 // Binary downloads have to fit in a tool result once base64-expanded.
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
 
-const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,iconLink,parents,trashed,shared,owners(emailAddress,displayName)';
+const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,iconLink,parents,trashed,shared,driveId,owners(emailAddress,displayName)';
 
 const encode = (id) => encodeURIComponent(String(id));
 
@@ -87,10 +116,21 @@ function summarizeFile(file) {
     is_folder:     file.mimeType === 'application/vnd.google-apps.folder',
     google_native: String(file.mimeType || '').startsWith('application/vnd.google-apps'),
     link:          file.webViewLink || null,
+    // Only populated for items in a shared drive, so its absence means My Drive.
+    shared_drive_id: file.driveId || null,
   };
 }
 
-async function searchFiles(accessToken, { query, filter, maxResults = 10, pageToken, orderBy } = {}) {
+/**
+ * Search one account's Drive.
+ *
+ * `corpora` decides which collections the query even looks at, and its default
+ * is `user` — My Drive and files shared directly with the account, which leaves
+ * every shared drive out. `allDrives` is the one that means "everything this
+ * account can see". Naming a `driveId` narrows to that shared drive instead,
+ * which is both cheaper and what "search the Marketing drive" asks for.
+ */
+async function searchFiles(accessToken, { query, filter, maxResults = 10, pageToken, orderBy, driveId } = {}) {
   const res = await call(accessToken, '/files', {
     query: {
       q:         buildQuery({ query, filter }),
@@ -99,6 +139,9 @@ async function searchFiles(accessToken, { query, filter, maxResults = 10, pageTo
       pageToken,
       fields:    `nextPageToken,files(${FILE_FIELDS})`,
       spaces:    'drive',
+      includeItemsFromAllDrives: 'true',
+      corpora:   driveId ? 'drive' : 'allDrives',
+      driveId:   driveId || undefined,
     },
   });
 
@@ -108,8 +151,50 @@ async function searchFiles(accessToken, { query, filter, maxResults = 10, pageTo
   };
 }
 
-const listRecent = (accessToken, { maxResults = 10, pageToken } = {}) =>
-  searchFiles(accessToken, { maxResults, pageToken, orderBy: 'modifiedTime desc' });
+const listRecent = (accessToken, { maxResults = 10, pageToken, driveId } = {}) =>
+  searchFiles(accessToken, { maxResults, pageToken, driveId, orderBy: 'modifiedTime desc' });
+
+/**
+ * The shared drives this account is a member of.
+ *
+ * A shared drive is owned by the organisation rather than by a person, so its
+ * files have no owner in the sense `search_files` reports — which is precisely
+ * why a personal-Drive-only connector loses the company's documents.
+ */
+async function listDrives(accessToken, { maxResults = 100 } = {}) {
+  const res = await call(accessToken, '/drives', {
+    query: { pageSize: Math.min(Math.max(maxResults, 1), 100), fields: 'drives(id,name,createdTime,hidden)' },
+  });
+
+  return (res.drives || []).map(d => ({
+    id:      d.id,
+    name:    d.name,
+    created: d.createdTime || null,
+    hidden:  Boolean(d.hidden),
+  }));
+}
+
+/**
+ * Replace bare shared-drive ids on search results with the drive's name.
+ *
+ * A raw id says nothing about where a file lives, and the id-to-name mapping is
+ * one cheap call for the whole result set. Best-effort on purpose: failing to
+ * name a drive must never fail the search that found the files.
+ */
+async function nameSharedDrives(accessToken, files) {
+  if (!files.some(f => f.shared_drive_id)) return files;
+
+  const byId = new Map();
+  try {
+    for (const d of await listDrives(accessToken)) byId.set(d.id, d.name);
+  } catch {
+    return files;
+  }
+
+  return files.map(f => (f.shared_drive_id && byId.has(f.shared_drive_id)
+    ? { ...f, shared_drive: byId.get(f.shared_drive_id) }
+    : f));
+}
 
 async function getMetadata(accessToken, fileId) {
   const file = await call(accessToken, `/files/${encode(fileId)}`, { query: { fields: FILE_FIELDS } });
@@ -449,7 +534,7 @@ async function trashFile(accessToken, fileId) {
 module.exports = {
   searchFiles, listRecent, getMetadata, getContent, createFile, updateFile,
   copyFile, listPermissions, share, unshare, trashFile, untrashFile, ocrViaConversion,
-  listComments, addComment,
+  listComments, addComment, listDrives, nameSharedDrives,
   MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS, EXPORT_FORMATS, GOOGLE_TYPES,
-  _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText },
+  _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText, ALL_DRIVES_PATH },
 };

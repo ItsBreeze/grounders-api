@@ -31,7 +31,7 @@ const READ_ONLY = new Set([
   'list_accounts', 'search_messages', 'search_threads', 'get_message', 'get_thread', 'get_attachment',
   'list_drafts', 'list_labels',
   'list_calendars', 'list_events', 'search_events', 'get_event', 'suggest_time',
-  'search_files', 'list_recent_files', 'get_file_metadata', 'read_file_content', 'get_file_permissions',
+  'search_files', 'list_recent_files', 'list_shared_drives', 'get_file_metadata', 'read_file_content', 'get_file_permissions',
   'search_contacts', 'list_contacts',
   'list_task_lists', 'list_tasks',
 ]);
@@ -195,6 +195,8 @@ async function probe(send, label, name, args, describe) {
     (p) => `${p.count} file(s) across ${p.searched.length} account(s)`);
   await probe(send, 'search_files', 'search_files', { query: 'a', max_results: 3 },
     (p) => `${p.count} match(es)`);
+  await probe(send, 'list_shared_drives', 'list_shared_drives', {},
+    (p) => `${p.count} shared drive(s) across ${p.searched.length} account(s)`);
 
   // Prove text extraction on whatever real document is nearest to hand.
   const readable = (recent?.files || []).find(f =>

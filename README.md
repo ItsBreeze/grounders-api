@@ -184,7 +184,7 @@ vars. Delete the routes and the migration block to remove it entirely.
 | GET | `/gmail/connect` | Link an account (repeat per account) |
 | POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
 
-### Tools (53)
+### Tools (54)
 
 Every tool takes an optional `account`. On a search, **omitting it fans the call
 out across every linked account** and merges the results — the thing no
@@ -209,14 +209,15 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 |------|-------|-------|
 | Read | `list_calendars`, `list_events`, `search_events`, `get_event` | `list_events` merges every linked calendar into one timeline, defaulting to the next 7 days; recurring series are expanded into actual occurrences, so a weekly standup appears on each day it happens |
 | Write | `create_event`, `update_event`, `delete_event` | Times are ISO 8601; a bare `YYYY-MM-DD` means all-day. `update_event` patches — unmentioned fields keep their value. Attendees are **not** emailed unless `send_updates` says so |
+| Repeats | `create_event`, `update_event`, `delete_event` | `repeat: "weekly"` (with `repeat_count` or `repeat_until`) covers the ordinary cases; `recurrence` takes full RFC 5545 rules. On a repeating event, `scope` chooses one occurrence or the whole series — see below |
 | RSVP | `respond_to_event` | accepted / declined / tentative, as the account that was invited; notifies the organiser by default |
 | Scheduling | `suggest_time` | Free slots across **every** linked calendar at once — busy anywhere means busy. Returns whole gaps rather than chopping a 3-hour opening into six half-hour slots |
 
-#### Drive (14)
+#### Drive (15)
 
 | Area | Tools | Notes |
 |------|-------|-------|
-| Find | `search_files`, `list_recent_files`, `get_file_metadata` | Text search over names and contents, with optional raw Drive query syntax in `filter`. Trashed files excluded unless you ask for them |
+| Find | `search_files`, `list_recent_files`, `get_file_metadata`, `list_shared_drives` | Text search over names and contents, with optional raw Drive query syntax in `filter`. **Covers My Drive and every shared drive at once**; `drive_id` narrows to one. Trashed files excluded unless you ask for them |
 | Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides exported (Sheets as CSV); **PDF, Word, Excel, PowerPoint and OpenDocument extracted to text**; `ocr: true` routes scans and images through Google's own conversion; `include_comments` returns the comment threads. `download_file_content` takes `export_as` — turn a Doc into a PDF or docx, a Sheet into xlsx. Text caps at 60 KB, binaries at 2 MB base64 |
 | Write | `create_file`, `update_file`, `copy_file` | Text via `content`, binary via `content_base64`. `convert_to` makes Drive convert the upload into an editable Doc, Sheet or Slides — or a folder. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
 | Comment | `comment_on_file` | Leave a comment on a draft, or reply to a thread — the review path that changes nothing in the document |
@@ -259,6 +260,54 @@ file created seconds earlier by that same call, never anything the user put
 there. If the cleanup itself fails, the result says so and names the file.
 
 Extraction is capped at 60 KB like every other body, with the cut flagged.
+
+### Shared drives
+
+A shared drive is owned by an organisation rather than by a person, which is
+where a company's actual documents live. Drive's own default hides them: a
+`files.list` without `corpora=allDrives` searches only My Drive and files shared
+directly with the account, and a request naming a file inside a shared drive
+comes back `404 File not found` unless it carries `supportsAllDrives` — an error
+that reads as a wrong id rather than as a missing capability.
+
+Every Drive request that accepts that parameter now carries it, applied in one
+place rather than at each of the eighteen call sites, so the next endpoint added
+cannot quietly reintroduce the gap. Which methods accept it is not a guess: it
+is taken from the v3 discovery document, and `files.export`, `comments` and
+`replies` are deliberately left out because they do not take it.
+
+Searches therefore span My Drive and every shared drive by default, and results
+name the drive a file came from rather than just its id. Google recommends
+narrowing where you can, so `list_shared_drives` gives the ids and `drive_id`
+confines a search to one.
+
+### Repeating events
+
+`list_events` expands a series into its occurrences — "what's on Tuesday" means
+the standup that Tuesday, not the rule that generates it. The consequence is that
+the id in hand is almost always one occurrence, and Google offers no flag saying
+whether an edit was meant for that occurrence or for all of them.
+
+So `update_event` and `delete_event` take a `scope`:
+
+| scope | Effect |
+|---|---|
+| `this_event` (default) | Changes only the occurrence named by `event_id` — "move tomorrow's standup" |
+| `series` | Resolves the occurrence back to its series and changes every one — "make it 10am from now on" |
+
+Reads carry `recurring_event_id`, which is what makes that resolution possible at
+all, and the result of every write says which it actually did. That matters in
+one direction especially: an id naming the series itself changes every occurrence
+even under `this_event`, because that is what patching a series does — so the
+result says `applies_to: "series"` rather than letting it pass silently.
+
+Creating a repeating event takes `repeat: "daily" | "weekly" | "monthly" |
+"yearly"`, with `repeat_count` or `repeat_until` to end it. Anything those cannot
+say — every second Tuesday, weekdays only — goes in `recurrence` as RFC 5545
+lines. Those are checked here rather than at Google: a rule with no `FREQ`, an
+unknown frequency, or a `DTSTART` line all come back naming the problem, where
+Google answers a generic `400`. A repeat rule belongs to a series and is silently
+dropped if written to one occurrence, so that is refused too.
 
 ### Setup
 
@@ -344,7 +393,7 @@ results.
 
 ### Tests
 
-Nine suites, all plain Node — no framework, no new dependencies. 344 checks.
+Ten suites, all plain Node — no framework, no new dependencies. 394 checks.
 
 ```bash
 # No database, no network:
@@ -357,6 +406,8 @@ npm run test:products   # free-slot arithmetic, Drive query quoting, multipart
 npm run test:drive-safety   # the sharing and overwrite guards, both env states
 npm run test:extract    # PDF and Office text extraction, against real fixtures
 npm run test:drive-parity   # upload framing, conversion, export and comments, on the wire
+npm run test:reach      # shared-drive request parameters, recurrence rules, and which
+                        # event a scoped write actually lands on
 
 # Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest

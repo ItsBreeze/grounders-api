@@ -11,6 +11,13 @@ const {
   text, tokenFor, fanOut, mergeSearch, ACCOUNT_PROP, SEARCH_PROPS, checkPageToken,
 } = require('../shared');
 
+const DRIVE_PROP = {
+  drive_id: {
+    type: 'string',
+    description: 'Restrict to one shared drive, by id from list_shared_drives. Omit to cover My Drive and every shared drive at once.',
+  },
+};
+
 const FILE_PROP = { file_id: { type: 'string', description: 'Drive file id, from search_files or list_recent_files.' } };
 
 const ROLES = ['reader', 'commenter', 'writer'];
@@ -43,13 +50,15 @@ const TOOLS = [
     name: 'search_files',
     description:
       'Search Drive by text across file names and contents. Omit `account` to search EVERY linked Drive at ' +
-      'once. Add `filter` for Drive query syntax (mimeType, modifiedTime, starred, "\'me\' in owners"). ' +
+      'once. Covers My Drive AND every shared drive the account belongs to; `drive_id` narrows to one shared ' +
+      'drive. Add `filter` for Drive query syntax (mimeType, modifiedTime, starred, "\'me\' in owners"). ' +
       'Trashed files are excluded unless your filter says otherwise.',
     inputSchema: {
       type: 'object',
       properties: {
         query:  { type: 'string', description: 'Text to find in names and contents.' },
         filter: { type: 'string', description: "Raw Drive query, ANDed with the text, e.g. \"mimeType='application/pdf'\"." },
+        ...DRIVE_PROP,
         ...SEARCH_PROPS,
       },
     },
@@ -57,13 +66,16 @@ const TOOLS = [
       checkPageToken(args);
       if (!args.query && !args.filter) throw new Error('Pass `query`, `filter`, or both.');
 
-      const fanned = await fanOut(ownerKey, args.account, 'drive', token =>
-        drive.searchFiles(token, {
+      const fanned = await fanOut(ownerKey, args.account, 'drive', async (token) => {
+        const found = await drive.searchFiles(token, {
           query:      args.query,
           filter:     args.filter,
+          driveId:    args.drive_id,
           maxResults: args.max_results || 10,
           pageToken:  args.page_token,
-        }));
+        });
+        return { ...found, files: await drive.nameSharedDrives(token, found.files) };
+      });
 
       return text(mergeSearch(fanned, { key: 'files', dateField: 'modified' }));
     },
@@ -71,14 +83,37 @@ const TOOLS = [
 
   {
     name: 'list_recent_files',
-    description: 'Most recently modified files, newest first. Omit `account` to merge every linked Drive.',
-    inputSchema: { type: 'object', properties: { ...SEARCH_PROPS } },
+    description:
+      'Most recently modified files, newest first, across My Drive and every shared drive. Omit `account` to ' +
+      'merge every linked Drive.',
+    inputSchema: { type: 'object', properties: { ...DRIVE_PROP, ...SEARCH_PROPS } },
     handler: async ({ ownerKey, args }) => {
       checkPageToken(args);
-      const fanned = await fanOut(ownerKey, args.account, 'drive', token =>
-        drive.listRecent(token, { maxResults: args.max_results || 10, pageToken: args.page_token }));
+      const fanned = await fanOut(ownerKey, args.account, 'drive', async (token) => {
+        const found = await drive.listRecent(token, {
+          maxResults: args.max_results || 10,
+          pageToken:  args.page_token,
+          driveId:    args.drive_id,
+        });
+        return { ...found, files: await drive.nameSharedDrives(token, found.files) };
+      });
 
       return text(mergeSearch(fanned, { key: 'files', dateField: 'modified' }));
+    },
+  },
+
+  {
+    name: 'list_shared_drives',
+    description:
+      'Shared drives (Team Drives) this account belongs to — the drives owned by an organisation rather than ' +
+      'by a person. Omit `account` to list them across every linked account. Use an id here as `drive_id` to ' +
+      'confine a search to one drive.',
+    inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP } },
+    handler: async ({ ownerKey, args }) => {
+      const fanned = await fanOut(ownerKey, args.account, 'drive', async token =>
+        ({ drives: await drive.listDrives(token) }));
+
+      return text(mergeSearch(fanned, { key: 'drives' }));
     },
   },
 

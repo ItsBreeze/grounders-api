@@ -36,6 +36,35 @@ function defaultWindow(args) {
   return { from, to };
 }
 
+const REPEAT_PROPS = {
+  repeat: {
+    type: 'string',
+    enum: ['daily', 'weekly', 'monthly', 'yearly'],
+    description: 'Make it repeat on a simple schedule, starting from `start`.',
+  },
+  repeat_count: { type: 'number', description: 'Stop after this many occurrences. Use with `repeat`.' },
+  repeat_until: { type: 'string', description: 'Stop repeating after this date (ISO 8601). Use with `repeat`.' },
+  recurrence: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Full RFC 5545 rules for anything `repeat` cannot say — e.g. ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"] or ' +
+      '["RRULE:FREQ=MONTHLY;BYDAY=2TU"]. No DTSTART/DTEND lines; the event\'s start and end carry those. ' +
+      'An empty array on update_event stops an event repeating, leaving a single event behind.',
+  },
+};
+
+const SCOPE_PROP = {
+  scope: {
+    type: 'string',
+    enum: ['this_event', 'series'],
+    description:
+      'For an event that repeats: "this_event" (default) touches only the occurrence named by event_id, ' +
+      '"series" touches every occurrence. Ids from list_events are occurrences, so "move the standup to 10am ' +
+      'from now on" needs "series".',
+  },
+};
+
 const TOOLS = [
   {
     name: 'list_calendars',
@@ -158,7 +187,8 @@ const TOOLS = [
     name: 'create_event',
     description:
       'Create an event on one account\'s calendar. Times are ISO 8601 ("2026-09-01T14:00:00-06:00"); ' +
-      'a bare date ("2026-09-01") makes it all-day. Attendees are NOT emailed unless send_updates says so.',
+      'a bare date ("2026-09-01") makes it all-day. Pass `repeat` for a recurring event, or `recurrence` ' +
+      'for a rule it cannot express. Attendees are NOT emailed unless send_updates says so.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -172,6 +202,7 @@ const TOOLS = [
         description: { type: 'string' },
         location:    { type: 'string' },
         attendees:   { type: 'array', items: { type: 'string' }, description: 'Email addresses to invite.' },
+        ...REPEAT_PROPS,
       },
       required: ['title', 'start', 'end'],
     },
@@ -186,6 +217,10 @@ const TOOLS = [
         location:    args.location,
         attendees:   args.attendees,
         sendUpdates: args.send_updates,
+        recurrence:  args.recurrence,
+        repeat:      args.repeat,
+        repeatCount: args.repeat_count,
+        repeatUntil: args.repeat_until,
       });
       return text({ account: email, created: true, ...event });
     },
@@ -195,7 +230,8 @@ const TOOLS = [
     name: 'update_event',
     description:
       'Change an existing event. Only the fields you pass are touched — everything else keeps its value. ' +
-      'Passing `attendees` REPLACES the guest list rather than adding to it.',
+      'Passing `attendees` REPLACES the guest list rather than adding to it. On a repeating event, `scope` ' +
+      'chooses between the one occurrence and the whole series; the result says which it changed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,6 +246,8 @@ const TOOLS = [
         description: { type: 'string' },
         location:    { type: 'string' },
         attendees:   { type: 'array', items: { type: 'string' }, description: 'Replaces the whole guest list.' },
+        ...SCOPE_PROP,
+        ...REPEAT_PROPS,
       },
       required: ['event_id'],
     },
@@ -224,6 +262,11 @@ const TOOLS = [
         location:    args.location,
         attendees:   args.attendees,
         sendUpdates: args.send_updates,
+        scope:       args.scope,
+        recurrence:  args.recurrence,
+        repeat:      args.repeat,
+        repeatCount: args.repeat_count,
+        repeatUntil: args.repeat_until,
       });
       return text({ account: email, updated: true, ...event });
     },
@@ -233,24 +276,31 @@ const TOOLS = [
     name: 'delete_event',
     description:
       'Delete an event. It goes to the calendar\'s trash and is restorable for 30 days. ' +
-      'If it has guests, deleting cancels the meeting for them — pass send_updates: "all" to tell them.',
+      'If it has guests, deleting cancels the meeting for them — pass send_updates: "all" to tell them. ' +
+      'On a repeating event this cancels only the occurrence named by event_id unless scope is "series".',
     inputSchema: {
       type: 'object',
-      properties: { ...ACCOUNT_PROP, ...CALENDAR_PROP, ...SEND_UPDATES_PROP, event_id: { type: 'string' } },
+      properties: {
+        ...ACCOUNT_PROP, ...CALENDAR_PROP, ...SEND_UPDATES_PROP, ...SCOPE_PROP,
+        event_id: { type: 'string' },
+      },
       required: ['event_id'],
     },
     handler: async ({ ownerKey, args }) => {
       const { email, token } = await tokenFor(ownerKey, args.account, 'calendar');
-      const calendarId = args.calendar_id || 'primary';
 
-      // Read it first so the result can say what was deleted, not just "ok".
-      const event = await calendar.getEvent(token, calendarId, args.event_id).catch(() => null);
-      await calendar.deleteEvent(token, calendarId, args.event_id, { sendUpdates: args.send_updates });
+      // deleteEvent reads the event first, so the result can say what went —
+      // and, on a repeating event, whether one occurrence went or all of them.
+      const gone = await calendar.deleteEvent(token, args.calendar_id || 'primary', args.event_id, {
+        sendUpdates: args.send_updates,
+        scope:       args.scope,
+      });
 
       return text({
         account: email,
-        event_id: args.event_id,
-        deleted: event ? event.title : true,
+        event_id: gone.id,
+        deleted: gone.title,
+        applies_to: gone.applies_to,
         status: 'moved to the calendar trash — restorable for 30 days',
       });
     },
