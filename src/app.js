@@ -103,6 +103,7 @@ app.get('/.well-known/oauth-authorization-server/mcp',
 
 app.post('/mcp/oauth/authorize',      passwordLimiter);
 app.post('/gmail/connect',           passwordLimiter);
+app.post('/gmail/check',             passwordLimiter);
 app.post('/gmail/unlink',            passwordLimiter);
 app.post('/gmail/accounts',          passwordLimiter);
 

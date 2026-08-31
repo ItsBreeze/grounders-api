@@ -116,6 +116,48 @@ async function refreshAccessToken(refreshToken) {
   });
 }
 
+/**
+ * Check GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET without a consent round-trip.
+ *
+ * Google validates the client credentials before it looks at the grant, so a
+ * deliberately bogus authorization code separates the two failures cleanly:
+ *   invalid_client → the id or the secret is wrong
+ *   invalid_grant  → credentials accepted; only the code was bad, as expected
+ */
+async function verifyCredentials() {
+  const { clientId, clientSecret, redirectUri } = config();
+
+  const res = await fetch(TOKEN_URL, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:    new URLSearchParams({
+      grant_type:    'authorization_code',
+      code:          'credential-probe-not-a-real-code',
+      client_id:     clientId,
+      client_secret: clientSecret,
+      redirect_uri:  redirectUri,
+    }).toString(),
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (body.error === 'invalid_grant') {
+    return { ok: true, detail: 'Client ID and secret accepted by Google.' };
+  }
+
+  if (body.error === 'invalid_client') {
+    const description = body.error_description || '';
+    const secretBlamed = /secret/i.test(description);
+    return {
+      ok: false,
+      culprit: secretBlamed ? 'GOOGLE_CLIENT_SECRET' : 'GOOGLE_CLIENT_ID',
+      detail: description || 'Google rejected the client credentials.',
+    };
+  }
+
+  return { ok: false, culprit: null, detail: body.error_description || body.error || `HTTP ${res.status}` };
+}
+
 async function fetchUserinfo(accessToken) {
   const res = await fetch(USERINFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new Error(`Google userinfo: HTTP ${res.status}`);
@@ -131,4 +173,4 @@ async function revoke(token) {
   }).catch(() => {}); // best-effort — local delete still proceeds
 }
 
-module.exports = { normalizeBaseUrl, authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, config };
+module.exports = { normalizeBaseUrl, verifyCredentials, authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, config };
