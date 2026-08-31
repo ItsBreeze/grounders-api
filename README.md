@@ -184,7 +184,7 @@ vars. Delete the routes and the migration block to remove it entirely.
 | GET | `/gmail/connect` | Link an account (repeat per account) |
 | POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
 
-### Tools (52)
+### Tools (53)
 
 Every tool takes an optional `account`. On a search, **omitting it fans the call
 out across every linked account** and merges the results — the thing no
@@ -212,13 +212,14 @@ so "create this event" is never ambiguous about whose calendar it lands in.
 | RSVP | `respond_to_event` | accepted / declined / tentative, as the account that was invited; notifies the organiser by default |
 | Scheduling | `suggest_time` | Free slots across **every** linked calendar at once — busy anywhere means busy. Returns whole gaps rather than chopping a 3-hour opening into six half-hour slots |
 
-#### Drive (13)
+#### Drive (14)
 
 | Area | Tools | Notes |
 |------|-------|-------|
 | Find | `search_files`, `list_recent_files`, `get_file_metadata` | Text search over names and contents, with optional raw Drive query syntax in `filter`. Trashed files excluded unless you ask for them |
-| Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides exported (Sheets as CSV); **PDF, Word, Excel, PowerPoint and OpenDocument extracted to text**; `ocr: true` routes scans and images through Google's own conversion. Text caps at 60 KB, binaries at 2 MB base64 |
-| Write | `create_file`, `update_file`, `copy_file` | Text content in, folders via `parents`. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
+| Read | `read_file_content`, `download_file_content` | Docs, Sheets and Slides exported (Sheets as CSV); **PDF, Word, Excel, PowerPoint and OpenDocument extracted to text**; `ocr: true` routes scans and images through Google's own conversion; `include_comments` returns the comment threads. `download_file_content` takes `export_as` — turn a Doc into a PDF or docx, a Sheet into xlsx. Text caps at 60 KB, binaries at 2 MB base64 |
+| Write | `create_file`, `update_file`, `copy_file` | Text via `content`, binary via `content_base64`. `convert_to` makes Drive convert the upload into an editable Doc, Sheet or Slides — or a folder. `update_file` renames, moves and describes; overwriting contents additionally needs `replace_content: true` |
+| Comment | `comment_on_file` | Leave a comment on a draft, or reply to a thread — the review path that changes nothing in the document |
 | Sharing | `get_file_permissions`, `share_file`, `unshare_file` | Shares with one named person at reader/commenter/writer. Domain-wide and public-link sharing are off unless `DRIVE_ALLOW_PUBLIC_SHARING=true`, and then still need `confirm_public`. **`unshare_file` withdraws access** — by person, by domain, or by removing the public link |
 | Remove | `trash_file`, `untrash_file` | Trash and restore, within the 30-day window — see the scope note below |
 
@@ -343,7 +344,7 @@ results.
 
 ### Tests
 
-Eight suites, all plain Node — no framework, no new dependencies. 303 checks.
+Nine suites, all plain Node — no framework, no new dependencies. 338 checks.
 
 ```bash
 # No database, no network:
@@ -355,6 +356,7 @@ npm run test:products   # free-slot arithmetic, Drive query quoting, multipart
                         # upload framing, task dates, scope gating, tool-surface shape
 npm run test:drive-safety   # the sharing and overwrite guards, both env states
 npm run test:extract    # PDF and Office text extraction, against real fixtures
+npm run test:drive-parity   # upload framing, conversion, export and comments, on the wire
 
 # Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest

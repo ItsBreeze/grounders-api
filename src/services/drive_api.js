@@ -23,6 +23,31 @@ const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,createdTime,webViewLink,
 
 const encode = (id) => encodeURIComponent(String(id));
 
+/** Friendly names for the Google-native types, for callers that should not need the URIs. */
+const GOOGLE_TYPES = {
+  document:     'application/vnd.google-apps.document',
+  spreadsheet:  'application/vnd.google-apps.spreadsheet',
+  presentation: 'application/vnd.google-apps.presentation',
+  folder:       'application/vnd.google-apps.folder',
+};
+
+/** What a Google-native document can be exported as, by friendly name. */
+const EXPORT_FORMATS = {
+  pdf:  'application/pdf',
+  txt:  'text/plain',
+  html: 'text/html',
+  rtf:  'application/rtf',
+  csv:  'text/csv',
+  tsv:  'text/tab-separated-values',
+  epub: 'application/epub+zip',
+  md:   'text/markdown',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odt:  'application/vnd.oasis.opendocument.text',
+  ods:  'application/vnd.oasis.opendocument.spreadsheet',
+};
+
 /** Google-native documents have no bytes to download — they must be exported. */
 const EXPORT_AS = {
   'application/vnd.google-apps.document':     'text/plain',
@@ -98,11 +123,21 @@ async function getMetadata(accessToken, fileId) {
  * as-is. Returns the buffer plus the mime type it actually came back as, which
  * is not the file's own type when an export happened.
  */
-async function getContent(accessToken, fileId) {
-  const meta   = await getMetadata(accessToken, fileId);
-  const asText = EXPORT_AS[meta.mime_type];
+async function getContent(accessToken, fileId, { exportAs } = {}) {
+  const meta = await getMetadata(accessToken, fileId);
 
   if (meta.is_folder) throw new Error(`"${meta.name}" is a folder, not a file.`);
+
+  if (exportAs && !meta.google_native) {
+    throw new Error(`"${meta.name}" is already ${meta.mime_type}; only Google Docs, Sheets and Slides can be exported to another format.`);
+  }
+
+  const wanted = exportAs ? EXPORT_FORMATS[exportAs] : null;
+  if (exportAs && !wanted) {
+    throw new Error(`Unknown export format "${exportAs}". Available: ${Object.keys(EXPORT_FORMATS).join(', ')}.`);
+  }
+
+  const asText = wanted || EXPORT_AS[meta.mime_type];
 
   if (!asText && meta.size_bytes && meta.size_bytes > MAX_DOWNLOAD_BYTES) {
     throw new Error(`"${meta.name}" is ${meta.size_bytes} bytes — over the ${MAX_DOWNLOAD_BYTES} byte limit for tool results.`);
@@ -183,33 +218,65 @@ function multipartBody(metadata, content, mimeType, boundary) {
   ]);
 }
 
-async function createFile(accessToken, { name, content = '', mimeType = 'text/plain', parents, description }) {
-  const boundary = `grounders-${Date.now().toString(36)}`;
+/**
+ * Create a file.
+ *
+ * Three shapes in one call, because Drive treats them as one: an ordinary file
+ * from text or bytes, an empty container (a folder, or a blank Google Doc), and
+ * an upload converted on the way in. Conversion is Drive's own — upload HTML or
+ * Markdown as `document` and it lands as an editable Google Doc, a CSV as
+ * `spreadsheet` and it lands as a Sheet.
+ */
+async function createFile(accessToken, {
+  name, content, contentBase64, mimeType = 'text/plain', convertTo, parents, description,
+}) {
+  if (convertTo && !GOOGLE_TYPES[convertTo]) {
+    throw new Error(`Unknown convert_to "${convertTo}". Available: ${Object.keys(GOOGLE_TYPES).join(', ')}.`);
+  }
+
   const metadata = {
     name,
     ...(parents && parents.length ? { parents } : {}),
     ...(description ? { description } : {}),
-    ...(mimeType ? { mimeType } : {}),
+    // The metadata type is what the file BECOMES; the part's type is what was
+    // sent. Making them differ is exactly how Drive is asked to convert.
+    mimeType: convertTo ? GOOGLE_TYPES[convertTo] : mimeType,
   };
 
+  // Nothing to upload: a folder or an empty native document is metadata alone.
+  if (content === undefined && contentBase64 === undefined) {
+    return summarizeFile(await call(accessToken, '/files', {
+      method: 'POST',
+      query:  { fields: FILE_FIELDS },
+      body:   metadata,
+    }));
+  }
+
+  const bytes = contentBase64 !== undefined
+    ? Buffer.from(contentBase64, 'base64')
+    : Buffer.from(String(content), 'utf8');
+
+  const boundary = `grounders-${Date.now().toString(36)}`;
   const file = await upload(accessToken, '/files', {
     method:  'POST',
     query:   { uploadType: 'multipart', fields: FILE_FIELDS },
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body:    multipartBody(metadata, content, mimeType, boundary),
+    body:    multipartBody(metadata, bytes, mimeType, boundary),
   });
 
   return summarizeFile(file);
 }
 
 /** Rename/move/describe, replace the content, or both. */
-async function updateFile(accessToken, fileId, { name, content, mimeType, description, addParents, removeParents }) {
+async function updateFile(accessToken, fileId, {
+  name, content, contentBase64, mimeType, description, addParents, removeParents,
+}) {
   const metadata = {
     ...(name        !== undefined ? { name }        : {}),
     ...(description !== undefined ? { description } : {}),
   };
 
-  if (content === undefined) {
+  if (content === undefined && contentBase64 === undefined) {
     if (!Object.keys(metadata).length && !addParents && !removeParents) {
       throw new Error('Nothing to update — pass name, description, content or a parent change.');
     }
@@ -221,12 +288,16 @@ async function updateFile(accessToken, fileId, { name, content, mimeType, descri
     return summarizeFile(file);
   }
 
+  const bytes = contentBase64 !== undefined
+    ? Buffer.from(contentBase64, 'base64')
+    : Buffer.from(String(content), 'utf8');
+
   const boundary = `grounders-${Date.now().toString(36)}`;
   const file = await upload(accessToken, `/files/${encode(fileId)}`, {
     method:  'PATCH',
     query:   { uploadType: 'multipart', fields: FILE_FIELDS, addParents, removeParents },
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
-    body:    multipartBody(metadata, content, mimeType || 'text/plain', boundary),
+    body:    multipartBody(metadata, bytes, mimeType || 'text/plain', boundary),
   });
 
   return summarizeFile(file);
@@ -317,6 +388,55 @@ async function untrashFile(accessToken, fileId) {
   return summarizeFile(file);
 }
 
+/**
+ * Comment threads on a document, with their replies.
+ *
+ * `quotedFileContent` is the passage a comment is anchored to, which is what
+ * makes a comment legible without the document open beside it.
+ */
+async function listComments(accessToken, fileId, { includeResolved = true, maxResults = 50 } = {}) {
+  const res = await call(accessToken, `/files/${encode(fileId)}/comments`, {
+    query: {
+      pageSize: Math.min(Math.max(maxResults, 1), 100),
+      fields: 'comments(id,author(displayName,me),content,createdTime,modifiedTime,resolved,' +
+              'quotedFileContent(value),replies(id,author(displayName,me),content,createdTime))',
+    },
+  });
+
+  return (res.comments || [])
+    .filter(c => includeResolved || !c.resolved)
+    .map(c => ({
+      id:        c.id,
+      author:    (c.author || {}).displayName || 'Unknown',
+      by_me:     Boolean((c.author || {}).me),
+      content:   c.content || '',
+      on_text:   ((c.quotedFileContent || {}).value) || null,
+      resolved:  Boolean(c.resolved),
+      created:   c.createdTime || null,
+      replies:   (c.replies || []).map(r => ({
+        id:      r.id,
+        author:  (r.author || {}).displayName || 'Unknown',
+        content: r.content || '',
+        created: r.createdTime || null,
+      })),
+    }));
+}
+
+/** Leave a comment on a document, or reply to an existing thread. */
+async function addComment(accessToken, fileId, { content, replyTo }) {
+  const path = replyTo
+    ? `/files/${encode(fileId)}/comments/${encode(replyTo)}/replies`
+    : `/files/${encode(fileId)}/comments`;
+
+  const created = await call(accessToken, path, {
+    method: 'POST',
+    query:  { fields: replyTo ? 'id,content,createdTime' : 'id,content,createdTime,resolved' },
+    body:   { content },
+  });
+
+  return { id: created.id, content: created.content, created: created.createdTime, reply_to: replyTo || null };
+}
+
 async function trashFile(accessToken, fileId) {
   const file = await call(accessToken, `/files/${encode(fileId)}`, {
     method: 'PATCH',
@@ -329,6 +449,7 @@ async function trashFile(accessToken, fileId) {
 module.exports = {
   searchFiles, listRecent, getMetadata, getContent, createFile, updateFile,
   copyFile, listPermissions, share, unshare, trashFile, untrashFile, ocrViaConversion,
-  MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS,
+  listComments, addComment,
+  MAX_TEXT_CHARS, MAX_DOWNLOAD_BYTES, EXPORT_AS, EXPORT_FORMATS, GOOGLE_TYPES,
   _internal: { buildQuery, quote, summarizeFile, multipartBody, truncateText },
 };

@@ -109,11 +109,22 @@ const TOOLS = [
           description: 'Read via Google conversion, which OCRs scans and images. Makes a temporary copy in ' +
                        'the account\'s Drive and deletes it afterwards. Use when a normal read reports no text layer.',
         },
+        include_comments: {
+          type: 'boolean',
+          description: 'Also return the comment threads on the document, with replies and the text each is anchored to.',
+        },
       },
       required: ['file_id'],
     },
     handler: async ({ ownerKey, args }) => {
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+
+      const comments = args.include_comments
+        ? await drive.listComments(token, args.file_id).catch(err => ({ error: err.message }))
+        : null;
+      const commentField = comments
+        ? { comments: Array.isArray(comments) ? comments : [], ...(comments.error ? { comments_error: comments.error } : {}) }
+        : {};
 
       if (args.ocr) {
         const converted = await drive.ocrViaConversion(token, args.file_id);
@@ -122,6 +133,7 @@ const TOOLS = [
           name: converted.name,
           mime_type: converted.source_mime_type,
           read_via: 'Google Drive conversion (OCR)',
+          ...commentField,
           ...(converted.orphaned_copy
             ? { warning: `The temporary copy ${converted.orphaned_copy} could not be deleted — remove it manually.` }
             : {}),
@@ -146,6 +158,7 @@ const TOOLS = [
         ...(exported ? { exported_from: meta.mime_type } : {}),
         ...(result.kind !== 'text' ? { read_as: result.kind } : {}),
         ...(result.pages ? { pages: result.pages } : {}),
+        ...commentField,
         content: drive._internal.truncateText(result.text),
       });
     },
@@ -155,16 +168,30 @@ const TOOLS = [
     name: 'download_file_content',
     description:
       'Download a file as base64 — PDFs, images, archives, anything not text. 2 MB limit. ' +
-      'Google-native docs are exported to text first, so prefer read_file_content for those.',
-    inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP, ...FILE_PROP }, required: ['file_id'] },
+      'For a Google Doc, Sheet or Slides, `export_as` converts it on the way out: pdf, docx, xlsx, pptx, ' +
+      'csv, html, md and more. That is how you turn a Doc into a PDF or a Sheet into a spreadsheet file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...ACCOUNT_PROP,
+        ...FILE_PROP,
+        export_as: {
+          type: 'string',
+          enum: Object.keys(drive.EXPORT_FORMATS),
+          description: 'Convert a Google-native document to this format on the way out.',
+        },
+      },
+      required: ['file_id'],
+    },
     handler: async ({ ownerKey, args }) => {
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
-      const { meta, data, mimeType } = await drive.getContent(token, args.file_id);
+      const { meta, data, mimeType } = await drive.getContent(token, args.file_id, { exportAs: args.export_as });
 
       return text({
         account: email,
         name: meta.name,
         mime_type: mimeType,
+        ...(args.export_as ? { exported_from: meta.mime_type } : {}),
         size_bytes: data.length,
         base64: data.toString('base64'),
       });
@@ -174,28 +201,39 @@ const TOOLS = [
   {
     name: 'create_file',
     description:
-      'Create a file in Drive from text content. Pass `parents` to put it in a folder (a folder id from ' +
-      'search_files). To make a folder instead, set mime_type to application/vnd.google-apps.folder.',
+      'Create a file in Drive. Text goes in `content`; binary (an image, a PDF) goes in `content_base64`. ' +
+      'Set convert_to: "document" | "spreadsheet" | "presentation" to have Drive convert the upload into an ' +
+      'editable Google Doc, Sheet or Slides — HTML or Markdown makes a good Doc, CSV a good Sheet. ' +
+      'convert_to: "folder" with no content makes a folder. Omit content entirely for an empty file.',
     inputSchema: {
       type: 'object',
       properties: {
         ...ACCOUNT_PROP,
-        name:        { type: 'string' },
-        content:     { type: 'string', description: 'Text content. Omit for an empty file or a folder.' },
-        mime_type:   { type: 'string', description: 'Defaults to text/plain.' },
-        description: { type: 'string' },
-        parents:     { type: 'array', items: { type: 'string' }, description: 'Folder ids to create it in.' },
+        name:           { type: 'string' },
+        content:        { type: 'string', description: 'Text content.' },
+        content_base64: { type: 'string', description: 'Binary content, base64-encoded. Use instead of `content`.' },
+        mime_type:      { type: 'string', description: 'Type of the content being uploaded. Defaults to text/plain.' },
+        convert_to:     { type: 'string', enum: ['document', 'spreadsheet', 'presentation', 'folder'],
+                          description: 'Convert the upload into this Google-native type.' },
+        description:    { type: 'string' },
+        parents:        { type: 'array', items: { type: 'string' }, description: 'Folder ids to create it in.' },
       },
       required: ['name'],
     },
     handler: async ({ ownerKey, args }) => {
+      if (args.content !== undefined && args.content_base64 !== undefined) {
+        throw new Error('Pass `content` or `content_base64`, not both.');
+      }
+
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
       const file = await drive.createFile(token, {
-        name:        args.name,
-        content:     args.content || '',
-        mimeType:    args.mime_type || 'text/plain',
-        description: args.description,
-        parents:     args.parents,
+        name:          args.name,
+        content:       args.content,
+        contentBase64: args.content_base64,
+        mimeType:      args.mime_type || 'text/plain',
+        convertTo:     args.convert_to,
+        description:   args.description,
+        parents:       args.parents,
       });
       return text({ account: email, created: true, ...file });
     },
@@ -213,8 +251,9 @@ const TOOLS = [
         ...ACCOUNT_PROP,
         ...FILE_PROP,
         name:            { type: 'string' },
-        content:         { type: 'string', description: 'New content. Requires replace_content: true.' },
-        replace_content: { type: 'boolean', description: 'Confirms that `content` should overwrite what is in the file now.' },
+        content:         { type: 'string', description: 'New text content. Requires replace_content: true.' },
+        content_base64:  { type: 'string', description: 'New binary content, base64-encoded. Requires replace_content: true.' },
+        replace_content: { type: 'boolean', description: 'Confirms that the new content should overwrite what is in the file now.' },
         mime_type:       { type: 'string' },
         description:     { type: 'string' },
         add_parents:    { type: 'string', description: 'Folder id to move it into.' },
@@ -223,17 +262,21 @@ const TOOLS = [
       required: ['file_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      if (args.content !== undefined && !args.replace_content) {
+      if ((args.content !== undefined || args.content_base64 !== undefined) && !args.replace_content) {
         throw new Error(
-          'Replacing a file\'s contents needs replace_content: true alongside `content`. ' +
-          'To rename or move it instead, pass `name` or add_parents and leave `content` out.',
+          'Replacing a file\'s contents needs replace_content: true alongside the new content. ' +
+          'To rename or move it instead, pass `name` or add_parents and leave the content out.',
         );
+      }
+      if (args.content !== undefined && args.content_base64 !== undefined) {
+        throw new Error('Pass `content` or `content_base64`, not both.');
       }
 
       const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
       const file = await drive.updateFile(token, args.file_id, {
         name:          args.name,
         content:       args.content,
+        contentBase64: args.content_base64,
         mimeType:      args.mime_type,
         description:   args.description,
         addParents:    args.add_parents,
@@ -329,6 +372,32 @@ const TOOLS = [
       });
 
       return text({ account: email, file_id: args.file_id, shared_with: permission });
+    },
+  },
+
+  {
+    name: 'comment_on_file',
+    description:
+      'Leave a comment on a document, or reply to an existing thread with reply_to. Use it to raise a ' +
+      'question against a draft without editing it — the review path that changes nothing. ' +
+      'read_file_content with include_comments: true shows the threads and their ids.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...ACCOUNT_PROP,
+        ...FILE_PROP,
+        content:  { type: 'string', description: 'The comment text.' },
+        reply_to: { type: 'string', description: 'Comment id to reply to, from read_file_content with include_comments.' },
+      },
+      required: ['file_id', 'content'],
+    },
+    handler: async ({ ownerKey, args }) => {
+      const { email, token } = await tokenFor(ownerKey, args.account, 'drive');
+      const comment = await drive.addComment(token, args.file_id, {
+        content: args.content,
+        replyTo: args.reply_to,
+      });
+      return text({ account: email, file_id: args.file_id, posted: true, ...comment });
     },
   },
 

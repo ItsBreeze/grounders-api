@@ -15,7 +15,8 @@
     "test:threads": "node test/gmail_threads.test.js",
     "test:products": "node test/google_products.test.js",
     "test:drive-safety": "node test/drive_safety.test.js",
-    "test:extract": "node test/text_extract.test.js"
+    "test:extract": "node test/text_extract.test.js",
+    "test:drive-parity": "node test/drive_parity.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
