@@ -162,14 +162,12 @@ protected_zones     — lat/lng only, 500m radius default
 
 ## Google Multi-Account Connector
 
-This repository also hosts the **Google Multi-Account Connector** — a remote MCP
-server that gives Claude access to several Google accounts at once (Gmail,
-Calendar, Drive, Contacts and Tasks), where the first-party connectors each hold
-exactly one.
+The multi-account Google MCP connector that used to live in this repository now
+has its own home:
 
-It is self-contained: its own tables, env vars and route prefixes, with no foreign
-keys into the Grounders schema. Nothing above depends on it, and without its env
-vars its routes answer `503` while the rest of the API runs unaffected.
+**[github.com/ItsBreeze/google-multi-account-mcp](https://github.com/ItsBreeze/google-multi-account-mcp)**
 
-Its documentation lives in **[GOOGLE-CONNECTOR.md](GOOGLE-CONNECTOR.md)** — setup,
-the 54 tools, security notes and tests.
+It was always self-contained — its own tables, env vars and route prefixes, with
+no foreign keys into the Grounders schema — so moving it out changed nothing
+here. Its four tables are left in place rather than dropped, since they hold
+live encrypted Google tokens; see the note in `src/db/migrate.js`.
