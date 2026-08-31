@@ -46,6 +46,35 @@ async function tokenFor(ownerKey, requested) {
   return { email, token: await accounts.accessTokenFor(ownerKey, email) };
 }
 
+/**
+ * Run a per-mailbox call against one account, or against every linked account
+ * when none is named. allSettled throughout: one dead grant must not blank out
+ * the mailboxes that still answer.
+ */
+async function fanOut(ownerKey, account, perMailbox) {
+  const targets = account
+    ? [await resolveAccount(ownerKey, account)]
+    : await accounts.emailsFor(ownerKey);
+
+  // Hard error, not an empty result: "no matches" and "nothing was searched"
+  // must never look the same to the model.
+  if (!targets.length) throw new Error('No mailboxes are linked yet. Visit /gmail/connect to link one.');
+
+  const settled = await Promise.allSettled(targets.map(async (email) => ({
+    email,
+    value: await perMailbox(await accounts.accessTokenFor(ownerKey, email), email),
+  })));
+
+  const ok     = [];
+  const failed = [];
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') ok.push(result.value);
+    else failed.push(`${targets[i]}: ${result.reason.message}`);
+  });
+
+  return { targets, ok, failed };
+}
+
 /** Exactly one of message_id / thread_id, so a tool can act on either level. */
 function oneTarget(args) {
   if (args.message_id && args.thread_id) throw new Error('Pass message_id OR thread_id, not both.');
@@ -94,37 +123,21 @@ const TOOLS = [
         throw new Error('page_token requires `account` — pagination is per-mailbox.');
       }
 
-      const targets = args.account
-        ? [await resolveAccount(ownerKey, args.account)]
-        : await accounts.emailsFor(ownerKey);
-
-      // Hard error, not an empty result: "no matches" and "nothing was
-      // searched" must never look the same to the model.
-      if (!targets.length) throw new Error('No mailboxes are linked yet. Visit /gmail/connect to link one.');
-
-      // allSettled: one dead grant must not blank out results from the others.
-      const settled = await Promise.allSettled(targets.map(async (email) => {
-        const token = await accounts.accessTokenFor(ownerKey, email);
-        const page  = await gmail.searchMessages(token, {
+      const { targets, ok, failed } = await fanOut(ownerKey, args.account, token =>
+        gmail.searchMessages(token, {
           query: args.query,
           maxResults: args.max_results || 10,
           pageToken: args.page_token,
-        });
-        return { email, page };
-      }));
+        }));
 
-      const found      = [];
-      const nextTokens = {};
-      const failed     = [];
-
-      settled.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          found.push(...r.value.page.messages.map(m => ({ account: r.value.email, ...m })));
-          if (r.value.page.nextPageToken) nextTokens[r.value.email] = r.value.page.nextPageToken;
-        } else {
-          failed.push(`${targets[i]}: ${r.reason.message}`);
-        }
-      });
+      const found       = [];
+      const nextTokens  = {};
+      const unavailable = {};
+      for (const { email, value } of ok) {
+        found.push(...value.messages.map(m => ({ account: email, ...m })));
+        if (value.nextPageToken) nextTokens[email] = value.nextPageToken;
+        if (value.unavailable)   unavailable[email] = value.unavailable;
+      }
 
       found.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
 
@@ -134,8 +147,64 @@ const TOOLS = [
         searched: targets,
         ...(failed.length ? { errors: failed } : {}),
         ...(Object.keys(nextTokens).length ? { next_page_token: nextTokens } : {}),
+        ...(Object.keys(unavailable).length ? { unavailable_messages: unavailable } : {}),
         count: found.length,
         messages: found,
+      });
+    },
+  },
+
+  {
+    name: 'search_threads',
+    description:
+      'Search whole conversations instead of individual messages, using the same Gmail query syntax. ' +
+      'A thread matches when any message in it does, and comes back as one row: subject, every participant, ' +
+      'message count, unread count and when it last moved — the shape to use for "where does my thread with X stand". ' +
+      'Omit `account` to search EVERY linked mailbox at once, merged and sorted by latest activity. ' +
+      'Follow up with get_thread for the message bodies.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query:       { type: 'string', description: 'Gmail search query.' },
+        account:     { type: 'string', description: 'Mailbox to search. Omit to search all linked mailboxes.' },
+        max_results: { type: 'number', description: 'Max threads per mailbox (1-50, default 10).' },
+        page_token:  { type: 'string', description: 'Continue a previous search. Requires `account`.' },
+      },
+      required: ['query'],
+    },
+    handler: async ({ ownerKey, args }) => {
+      if (args.page_token && !args.account) {
+        throw new Error('page_token requires `account` — pagination is per-mailbox.');
+      }
+
+      const { targets, ok, failed } = await fanOut(ownerKey, args.account, token =>
+        gmail.searchThreads(token, {
+          query: args.query,
+          maxResults: args.max_results || 10,
+          pageToken: args.page_token,
+        }));
+
+      const found       = [];
+      const nextTokens  = {};
+      const unavailable = {};
+      for (const { email, value } of ok) {
+        found.push(...value.threads.map(t => ({ account: email, ...t })));
+        if (value.nextPageToken) nextTokens[email] = value.nextPageToken;
+        if (value.unavailable)   unavailable[email] = value.unavailable;
+      }
+
+      // Latest activity first — the last message's date, not the thread's start.
+      found.sort((a, b) => new Date(b.last_date || 0) - new Date(a.last_date || 0));
+
+      if (!found.length && failed.length) throw new Error(`All mailboxes failed — ${failed.join('; ')}`);
+
+      return text({
+        searched: targets,
+        ...(failed.length ? { errors: failed } : {}),
+        ...(Object.keys(nextTokens).length ? { next_page_token: nextTokens } : {}),
+        ...(Object.keys(unavailable).length ? { unavailable_threads: unavailable } : {}),
+        count: found.length,
+        threads: found,
       });
     },
   },
@@ -600,4 +669,4 @@ async function callTool(name, args, ownerKey) {
   return tool.handler({ ownerKey, args: args || {} });
 }
 
-module.exports = { descriptors, callTool, _internal: { resolveAccount, oneTarget, TOOLS } };
+module.exports = { descriptors, callTool, _internal: { resolveAccount, oneTarget, fanOut, TOOLS } };

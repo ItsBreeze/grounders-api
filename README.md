@@ -183,12 +183,12 @@ vars. Delete the routes and the migration block to remove it entirely.
 | GET | `/gmail/connect` | Link a mailbox (repeat per account) |
 | POST | `/gmail/unlink` | Unlink one, revoking the grant at Google |
 
-### Tools (22)
+### Tools (23)
 
 | Area | Tools | Notes |
 |------|-------|-------|
 | Accounts | `list_accounts` | Which mailboxes are linked, with token health |
-| Search | `search_messages` | Gmail query syntax. **Omit `account` to search every mailbox**, merged and date-sorted. Per-mailbox `page_token` pagination |
+| Search | `search_messages`, `search_threads` | Gmail query syntax. **Omit `account` to search every mailbox**, merged and date-sorted. Per-mailbox `page_token` pagination. `search_threads` returns one row per conversation — subject, every participant, message and unread counts, last activity — for "where does my thread with X stand" without pulling bodies. A detail fetch that fails is counted in `unavailable_*`, never silently dropped |
 | Read | `get_message`, `get_thread`, `get_attachment` | Bodies flattened to text and capped at 60 KB; attachment metadata included; `get_attachment` returns text files as text, binaries as base64 (2 MB cap) |
 | Send | `send_message`, `reply_to_message`, `forward_message` | Replies thread via `In-Reply-To`/`References`; forwards carry attachments (10 MB cap, skipped ones named) |
 | Drafts | `create_draft`, `list_drafts`, `get_draft`, `update_draft`, `send_draft`, `delete_draft` | `create_draft` with `reply_to_message_id` drafts an in-thread reply for review — the safe path for AI-written mail |
@@ -223,10 +223,19 @@ vars. Delete the routes and the migration block to remove it entirely.
 
 ### Tests
 
-Both suites are plain Node — no framework, no new dependencies.
+Five suites, all plain Node — no framework, no new dependencies.
 
 ```bash
+# No database, no network:
+npm run test:tokens     # MCP and user tokens cannot be swapped, in either direction
+npm run test:query      # Gmail query-string construction (repeated array params)
+npm run test:mime       # entity decoding, body truncation, MIME construction
+npm run test:threads    # address parsing, thread summaries, cross-account fan-out
+
+# Needs a database:
 DATABASE_URL=postgres://…  npm run test:accounts   # resolution + encryption at rest
-npm start &                                        # then, against the running API:
+
+# Needs the API running:
+npm start &
 TEST_BASE_URL=http://127.0.0.1:3000  npm run test:mcp   # OAuth + MCP protocol
 ```

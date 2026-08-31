@@ -123,8 +123,8 @@ const check = (name, cond, extra='') => {
 
   const list = await rpc({jsonrpc:'2.0', id:2, method:'tools/list'});
   const names = (list.json?.result?.tools || []).map(t => t.name);
-  check('tools/list returns 22 tools', names.length === 22, `got ${names.length}`);
-  for (const required of ['search_messages','create_draft','get_attachment','forward_message','untrash_message','mark_spam']) {
+  check('tools/list returns 23 tools', names.length === 23, `got ${names.length}`);
+  for (const required of ['search_messages','search_threads','create_draft','get_attachment','forward_message','untrash_message','mark_spam']) {
     check(`tool ${required} present`, names.includes(required));
   }
 
@@ -142,6 +142,18 @@ const check = (name, cond, extra='') => {
   check('search with no mailboxes is a hard error, not an empty result',
     missing.json?.result?.isError === true && !missing.json?.error,
     missing.json?.result?.content?.[0]?.text);
+
+  const missingThreads = await rpc({jsonrpc:'2.0', id:5.1, method:'tools/call',
+    params:{name:'search_threads', arguments:{query:'is:unread'}}});
+  check('thread search with no mailboxes is a hard error too',
+    missingThreads.json?.result?.isError === true && !missingThreads.json?.error,
+    missingThreads.json?.result?.content?.[0]?.text);
+
+  const badPage = await rpc({jsonrpc:'2.0', id:5.2, method:'tools/call',
+    params:{name:'search_threads', arguments:{query:'is:unread', page_token:'abc'}}});
+  check('thread page_token without an account is rejected',
+    (badPage.json?.result?.content?.[0]?.text || '').includes('page_token requires'),
+    badPage.json?.result?.content?.[0]?.text);
 
   const unknown = await rpc({jsonrpc:'2.0', id:6, method:'nonsense/method'});
   check('unknown method → -32601', unknown.json?.error?.code === -32601);
