@@ -133,6 +133,14 @@ Three things worth keeping straight:
 - **Sharing and trashing have no copy path**, only a draft. Copying a colleague's
   document and sharing *that* spreads their content further, not less.
 
+**A shared drive you are not a member of cannot be named.** Its id is also its
+root folder's id, which suggests `files.get` should name it — but reaching a file
+inside a drive grants nothing on the root folder above it, so that call answers
+`File not found`. This was built, deployed, and only then found not to work,
+because the test stub answered where the real API refuses. It now reports
+`shared_drive_member: false` instead. The lesson is narrow and worth keeping: a
+stub proves the code sends what you meant, never that the service permits it.
+
 **Revoking and restoring are never gated.** `unshare_file` and `untrash_file`
 work without confirmation even on files you do not own. The asymmetry is the
 point: widening access needs approval, narrowing never does, and a brake that
