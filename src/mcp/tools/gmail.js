@@ -1,59 +1,17 @@
 /**
- * MCP tool surface over every linked mailbox.
+ * Gmail tools.
  *
- * The `account` argument selects a mailbox by email address. Where it is
- * optional, omitting it fans the call out across all linked accounts — that
- * cross-account reach is the reason this server exists, since Claude's
- * first-party Gmail connector holds exactly one Google account.
+ * Every mailbox the operator has linked, reachable in one call — `account`
+ * selects one, and omitting it on a search fans out across all of them.
  */
 
-const accounts = require('../services/gmail_accounts');
-const gmail    = require('../services/gmail_api');
-
-const text = (value) => ({
-  content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
-});
-
-/** Resolve the caller's `account` argument to a linked address, with a helpful error. */
-async function resolveAccount(ownerKey, requested) {
-  const linked = await accounts.emailsFor(ownerKey);
-
-  if (!linked.length) {
-    throw new Error('No mailboxes are linked yet. Visit /gmail/connect to link one.');
-  }
-
-  if (!requested) {
-    if (linked.length === 1) return linked[0];
-    throw new Error(`Which account? Linked: ${linked.join(', ')}`);
-  }
-
-  const wanted = String(requested).toLowerCase().trim();
-  const exact  = linked.find(e => e === wanted);
-  if (exact) return exact;
-
-  // Tolerate a bare local-part ("work" for work@example.com) — Claude often
-  // passes whatever the user said rather than the full address.
-  const partial = linked.filter(e => e.startsWith(`${wanted}@`) || e.includes(wanted));
-  if (partial.length === 1) return partial[0];
-  if (partial.length > 1) throw new Error(`"${requested}" matches ${partial.join(', ')} — be specific.`);
-
-  throw new Error(`"${requested}" is not linked. Linked: ${linked.join(', ')}`);
-}
-
-/** account + access token in one step — nearly every tool starts this way. */
-async function tokenFor(ownerKey, requested) {
-  const email = await resolveAccount(ownerKey, requested);
-  return { email, token: await accounts.accessTokenFor(ownerKey, email) };
-}
-
-/** Exactly one of message_id / thread_id, so a tool can act on either level. */
-function oneTarget(args) {
-  if (args.message_id && args.thread_id) throw new Error('Pass message_id OR thread_id, not both.');
-  if (!args.message_id && !args.thread_id) throw new Error('Pass message_id or thread_id.');
-  return args.message_id ? { kind: 'message', id: args.message_id } : { kind: 'thread', id: args.thread_id };
-}
-
-const ACCOUNT_PROP = { account: { type: 'string', description: 'Mailbox holding the item. May be omitted when only one mailbox is linked.' } };
+const accounts = require('../../services/gmail_accounts');
+const gmail    = require('../../services/gmail_api');
+const extract  = require('../../services/text_extract');
+const {
+  text, resolveAccount, tokenFor, fanOut, mergeSearch, oneTarget,
+  ACCOUNT_PROP, SEARCH_PROPS, checkPageToken,
+} = require('../shared');
 
 const TOOLS = [
   // ─── Accounts & search ────────────────────────────────────────────────────
@@ -64,12 +22,32 @@ const TOOLS = [
     handler: async ({ ownerKey }) => {
       const rows = await accounts.list(ownerKey);
       if (!rows.length) return text('No mailboxes linked yet.');
-      return text(rows.map(r => ({
-        email: r.email,
-        linked_at: r.created_at,
-        refresh_token_stored: r.has_refresh_token,
-        access_token_expires: r.token_expires_at,
-      })));
+
+      const listed = rows.map((r) => {
+        const access = accounts.productAccess(r.scopes);
+        return {
+          email: r.email,
+          linked_at: r.created_at,
+          refresh_token_stored: r.has_refresh_token,
+          access_token_expires: r.token_expires_at,
+          access: access.granted,
+          ...(access.missing.length ? { missing_access: access.missing } : {}),
+          ...(access.recorded ? {} : { note: 'No scopes were recorded for this account; what it can do is unknown until a call is tried.' }),
+        };
+      });
+
+      // Say it once, plainly, rather than leaving it to be inferred from rows.
+      const incomplete = listed.filter(a => a.missing_access);
+
+      return text({
+        accounts: listed,
+        ...(incomplete.length ? {
+          action_needed:
+            `${incomplete.map(a => `${a.email} is missing ${a.missing_access.join(', ')}`).join('; ')}. ` +
+            'Re-link at /gmail/connect to add them. If a product is still missing after re-linking, its API ' +
+            'is not enabled on the Google Cloud project — Google drops scopes for APIs that are switched off.',
+        } : {}),
+      });
     },
   },
 
@@ -81,62 +59,52 @@ const TOOLS = [
       'For more results from one mailbox, pass its next_page_token back as page_token with that account.',
     inputSchema: {
       type: 'object',
-      properties: {
-        query:       { type: 'string', description: 'Gmail search query.' },
-        account:     { type: 'string', description: 'Mailbox to search. Omit to search all linked mailboxes.' },
-        max_results: { type: 'number', description: 'Max results per mailbox (1-50, default 10).' },
-        page_token:  { type: 'string', description: 'Continue a previous search. Requires `account`.' },
-      },
+      properties: { query: { type: 'string', description: 'Gmail search query.' }, ...SEARCH_PROPS },
       required: ['query'],
     },
     handler: async ({ ownerKey, args }) => {
-      if (args.page_token && !args.account) {
-        throw new Error('page_token requires `account` — pagination is per-mailbox.');
-      }
+      checkPageToken(args);
 
-      const targets = args.account
-        ? [await resolveAccount(ownerKey, args.account)]
-        : await accounts.emailsFor(ownerKey);
-
-      // Hard error, not an empty result: "no matches" and "nothing was
-      // searched" must never look the same to the model.
-      if (!targets.length) throw new Error('No mailboxes are linked yet. Visit /gmail/connect to link one.');
-
-      // allSettled: one dead grant must not blank out results from the others.
-      const settled = await Promise.allSettled(targets.map(async (email) => {
-        const token = await accounts.accessTokenFor(ownerKey, email);
-        const page  = await gmail.searchMessages(token, {
+      const fanned = await fanOut(ownerKey, args.account, 'gmail', token =>
+        gmail.searchMessages(token, {
           query: args.query,
           maxResults: args.max_results || 10,
           pageToken: args.page_token,
-        });
-        return { email, page };
+        }));
+
+      return text(mergeSearch(fanned, {
+        key: 'messages', dateField: 'date', unavailableKey: 'unavailable_messages',
       }));
+    },
+  },
 
-      const found      = [];
-      const nextTokens = {};
-      const failed     = [];
+  {
+    name: 'search_threads',
+    description:
+      'Search whole conversations instead of individual messages, using the same Gmail query syntax. ' +
+      'A thread matches when any message in it does, and comes back as one row: subject, every participant, ' +
+      'message count, unread count and when it last moved — the shape to use for "where does my thread with X stand". ' +
+      'Omit `account` to search EVERY linked mailbox at once, merged and sorted by latest activity. ' +
+      'Follow up with get_thread for the message bodies.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'Gmail search query.' }, ...SEARCH_PROPS },
+      required: ['query'],
+    },
+    handler: async ({ ownerKey, args }) => {
+      checkPageToken(args);
 
-      settled.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          found.push(...r.value.page.messages.map(m => ({ account: r.value.email, ...m })));
-          if (r.value.page.nextPageToken) nextTokens[r.value.email] = r.value.page.nextPageToken;
-        } else {
-          failed.push(`${targets[i]}: ${r.reason.message}`);
-        }
-      });
+      const fanned = await fanOut(ownerKey, args.account, 'gmail', token =>
+        gmail.searchThreads(token, {
+          query: args.query,
+          maxResults: args.max_results || 10,
+          pageToken: args.page_token,
+        }));
 
-      found.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-
-      if (!found.length && failed.length) throw new Error(`All mailboxes failed — ${failed.join('; ')}`);
-
-      return text({
-        searched: targets,
-        ...(failed.length ? { errors: failed } : {}),
-        ...(Object.keys(nextTokens).length ? { next_page_token: nextTokens } : {}),
-        count: found.length,
-        messages: found,
-      });
+      // Latest activity first — the last message's date, not the thread's start.
+      return text(mergeSearch(fanned, {
+        key: 'threads', dateField: 'last_date', unavailableKey: 'unavailable_threads',
+      }));
     },
   },
 
@@ -150,7 +118,7 @@ const TOOLS = [
       required: ['message_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       return text({ account: email, ...(await gmail.getMessage(token, args.message_id)) });
     },
   },
@@ -164,7 +132,7 @@ const TOOLS = [
       required: ['thread_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       return text({ account: email, ...(await gmail.getThread(token, args.thread_id)) });
     },
   },
@@ -172,8 +140,9 @@ const TOOLS = [
   {
     name: 'get_attachment',
     description:
-      'Download one attachment from a message. Text-like files (text/*, JSON, CSV, XML) come back as text; ' +
-      'binary files come back base64-encoded (2 MB limit). Get attachment ids from get_message or get_thread.',
+      'Read one attachment. PDFs, Word, Excel, PowerPoint, OpenDocument and text-like files come back as ' +
+      'TEXT, so an emailed contract or invoice can be read directly; anything else comes back base64-encoded ' +
+      '(2 MB limit). Get attachment ids from get_message or get_thread.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -184,7 +153,7 @@ const TOOLS = [
       required: ['message_id', 'attachment_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const data = await gmail.getAttachmentData(token, args.message_id, args.attachment_id);
 
       const MAX = 2 * 1024 * 1024;
@@ -197,16 +166,27 @@ const TOOLS = [
       const meta = msg.attachments.find(a => a.attachment_id === args.attachment_id) || {};
       const mime = meta.mime_type || 'application/octet-stream';
 
-      const textLike = /^text\/|[/+](json|csv|xml)$|^application\/(json|xml|csv)/.test(mime);
+      const filename = meta.filename || '(unknown)';
+      const result   = extract.extract(data, { mimeType: mime, filename });
 
       return text({
         account:    email,
-        filename:   meta.filename || '(unknown)',
+        filename,
         mime_type:  mime,
         size_bytes: data.length,
-        ...(textLike
-          ? { text: data.toString('utf8') }
-          : { base64: data.toString('base64'), note: 'Binary content, base64-encoded.' }),
+        ...(result.text !== null
+          ? {
+              ...(result.kind !== 'text' ? { read_as: result.kind } : {}),
+              ...(result.pages ? { pages: result.pages } : {}),
+              text: gmail._internal.truncateBody(result.text),
+            }
+          : {
+              base64: data.toString('base64'),
+              note: `Returned as base64 because the text could not be read: ${result.reason}` +
+                    (result.recoverable
+                      ? ' Saving it to Drive and reading it with ocr: true would extract the text.'
+                      : ''),
+            }),
       });
     },
   },
@@ -228,7 +208,7 @@ const TOOLS = [
       required: ['to', 'subject', 'body'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const sent = await gmail.sendMessage(token, {
         from: email, to: args.to, cc: args.cc, bcc: args.bcc,
         subject: args.subject, body: args.body,
@@ -251,7 +231,7 @@ const TOOLS = [
       required: ['message_id', 'body'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const ctx = await gmail.getReplyContext(token, args.message_id);
 
       // Drop our own address from a reply-all so we don't mail ourselves.
@@ -289,7 +269,7 @@ const TOOLS = [
       required: ['message_id', 'to'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const { sent, skippedAttachments } = await gmail.forwardMessage(token, {
         from: email, messageId: args.message_id, to: args.to, cc: args.cc, note: args.note,
       });
@@ -323,7 +303,7 @@ const TOOLS = [
       required: ['body'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
 
       let mime;
       if (args.reply_to_message_id) {
@@ -357,7 +337,7 @@ const TOOLS = [
       properties: { ...ACCOUNT_PROP, max_results: { type: 'number', description: '1-50, default 15.' } },
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       return text({ account: email, drafts: await gmail.listDrafts(token, { maxResults: args.max_results }) });
     },
   },
@@ -371,7 +351,7 @@ const TOOLS = [
       required: ['draft_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       return text({ account: email, ...(await gmail.getDraft(token, args.draft_id)) });
     },
   },
@@ -393,7 +373,7 @@ const TOOLS = [
       required: ['draft_id', 'to', 'subject', 'body'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
 
       // Preserve the thread a reply-draft belongs to.
       const existing = await gmail.getDraft(token, args.draft_id);
@@ -416,7 +396,7 @@ const TOOLS = [
       required: ['draft_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const sent = await gmail.sendDraft(token, args.draft_id);
       return text({ sent_from: email, message_id: sent.id, thread_id: sent.threadId });
     },
@@ -431,7 +411,7 @@ const TOOLS = [
       required: ['draft_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       await gmail.deleteDraft(token, args.draft_id);
       return text({ account: email, draft_id: args.draft_id, status: 'deleted' });
     },
@@ -456,7 +436,7 @@ const TOOLS = [
     },
     handler: async ({ ownerKey, args }) => {
       const target = oneTarget(args);
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const change = { add: args.add_labels || [], remove: args.remove_labels || [] };
 
       const result = target.kind === 'message'
@@ -473,7 +453,7 @@ const TOOLS = [
     description: 'List label ids and names for a mailbox.',
     inputSchema: { type: 'object', properties: { ...ACCOUNT_PROP } },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       return text({ account: email, labels: await gmail.listLabels(token) });
     },
   },
@@ -487,7 +467,7 @@ const TOOLS = [
       required: ['name'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const label = await gmail.createLabel(token, args.name);
       return text({ account: email, id: label.id, name: label.name });
     },
@@ -502,7 +482,7 @@ const TOOLS = [
       required: ['label_id', 'name'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const label = await gmail.updateLabel(token, args.label_id, args.name);
       return text({ account: email, id: label.id, name: label.name });
     },
@@ -517,7 +497,7 @@ const TOOLS = [
       required: ['label_id'],
     },
     handler: async ({ ownerKey, args }) => {
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       await gmail.deleteLabel(token, args.label_id);
       return text({ account: email, label_id: args.label_id, status: 'deleted' });
     },
@@ -537,7 +517,7 @@ const TOOLS = [
     },
     handler: async ({ ownerKey, args }) => {
       const target = oneTarget(args);
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       if (target.kind === 'message') await gmail.trashMessage(token, target.id);
       else await gmail.trashThread(token, target.id);
       return text({ account: email, [target.kind === 'message' ? 'message_id' : 'thread_id']: target.id, status: 'moved to trash' });
@@ -557,7 +537,7 @@ const TOOLS = [
     },
     handler: async ({ ownerKey, args }) => {
       const target = oneTarget(args);
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       if (target.kind === 'message') await gmail.untrashMessage(token, target.id);
       else await gmail.untrashThread(token, target.id);
       return text({ account: email, [target.kind === 'message' ? 'message_id' : 'thread_id']: target.id, status: 'restored from trash' });
@@ -578,7 +558,7 @@ const TOOLS = [
     },
     handler: async ({ ownerKey, args }) => {
       const target = oneTarget(args);
-      const { email, token } = await tokenFor(ownerKey, args.account);
+      const { email, token } = await tokenFor(ownerKey, args.account, 'gmail');
       const change = args.unmark
         ? { add: ['INBOX'], remove: ['SPAM'] }
         : { add: ['SPAM'], remove: ['INBOX'] };
@@ -592,12 +572,4 @@ const TOOLS = [
   },
 ];
 
-const descriptors = () => TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
-
-async function callTool(name, args, ownerKey) {
-  const tool = TOOLS.find(t => t.name === name);
-  if (!tool) throw new Error(`Unknown tool: ${name}`);
-  return tool.handler({ ownerKey, args: args || {} });
-}
-
-module.exports = { descriptors, callTool, _internal: { resolveAccount, oneTarget, TOOLS } };
+module.exports = TOOLS;

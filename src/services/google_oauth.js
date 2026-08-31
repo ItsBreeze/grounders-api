@@ -9,14 +9,44 @@ const AUTH_URL     = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL    = 'https://oauth2.googleapis.com/token';
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 
-// gmail.modify covers read, send, label, archive and trash — but NOT permanent
-// delete, which Google gates behind the separate mail.google.com scope. That
-// omission is deliberate: nothing here can irrecoverably destroy mail.
+/**
+ * What each linked account grants.
+ *
+ * gmail.modify covers read, send, label, archive and trash — but NOT permanent
+ * delete, which Google gates behind the separate mail.google.com scope. That
+ * omission is deliberate: nothing here can irrecoverably destroy mail.
+ *
+ * Drive has no equivalent middle scope. drive.file only sees files this app
+ * itself created, which cannot answer "find my lease agreement", so searching
+ * and editing existing files needs full drive — and full drive does permit
+ * permanent deletion. There the limit is enforced by the tool surface instead:
+ * trash_file trashes, and no tool passes Drive's permanent-delete endpoint.
+ *
+ * Contacts are read-only on purpose. They exist so "email Ann" resolves to an
+ * address; nothing here needs to rewrite an address book.
+ */
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/contacts.readonly',
+  'https://www.googleapis.com/auth/contacts.other.readonly',
+  'https://www.googleapis.com/auth/tasks',
   'https://www.googleapis.com/auth/userinfo.email',
   'openid',
 ];
+
+/**
+ * The scope each product's tools need, for the pre-flight check that turns an
+ * opaque Google 403 into "re-link this account".
+ */
+const PRODUCT_SCOPES = {
+  gmail:    'https://www.googleapis.com/auth/gmail.modify',
+  calendar: 'https://www.googleapis.com/auth/calendar',
+  drive:    'https://www.googleapis.com/auth/drive',
+  contacts: 'https://www.googleapis.com/auth/contacts.readonly',
+  tasks:    'https://www.googleapis.com/auth/tasks',
+};
 
 /**
  * PUBLIC_BASE_URL, trimmed and validated, with trailing slashes removed.
@@ -173,4 +203,4 @@ async function revoke(token) {
   }).catch(() => {}); // best-effort — local delete still proceeds
 }
 
-module.exports = { normalizeBaseUrl, verifyCredentials, authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, config };
+module.exports = { normalizeBaseUrl, verifyCredentials, authUrl, exchangeCode, refreshAccessToken, fetchUserinfo, revoke, SCOPES, PRODUCT_SCOPES, config };

@@ -71,13 +71,30 @@ async function remove(ownerKey, email) {
 }
 
 /**
- * A usable access token for one mailbox, refreshing if needed.
- * Throws a caller-friendly error when the account isn't linked or the grant
- * has been revoked at Google's end.
+ * Does this account's stored grant cover `product`?
+ *
+ * An account linked before a product's scope existed holds a token that Google
+ * will reject with a bare 403 — unrecognisable from a real permission problem.
+ * Checking the recorded scopes first turns that into "re-link this account".
+ *
+ * A row with no recorded scopes is treated as permitted: absence of a record
+ * is not evidence of absence of the grant, and a false block is worse than
+ * letting Google have the final say.
  */
-async function accessTokenFor(ownerKey, email) {
+function grantCovers(scopes, product) {
+  const required = google.PRODUCT_SCOPES[product];
+  if (!required || !scopes) return true;
+  return scopes.split(/\s+/).includes(required);
+}
+
+/**
+ * A usable access token for one mailbox, refreshing if needed.
+ * Throws a caller-friendly error when the account isn't linked, the grant
+ * has been revoked at Google's end, or it predates the product being asked for.
+ */
+async function accessTokenFor(ownerKey, email, product) {
   const { rows } = await pool.query(
-    `SELECT id, access_token_enc, refresh_token_enc, token_expires_at
+    `SELECT id, access_token_enc, refresh_token_enc, token_expires_at, scopes
        FROM gmail_accounts
       WHERE owner_key = $1 AND email = $2`,
     [ownerKey, email.toLowerCase()],
@@ -86,6 +103,14 @@ async function accessTokenFor(ownerKey, email) {
   if (!rows.length) throw new Error(`No linked account for ${email}. Link it first, then retry.`);
 
   const row     = rows[0];
+
+  if (!grantCovers(row.scopes, product)) {
+    throw new Error(
+      `${email} was linked before ${product} access was added, so its grant does not cover it. ` +
+      'Re-link it at /gmail/connect — nothing else about the account changes.',
+    );
+  }
+
   const expires = row.token_expires_at ? new Date(row.token_expires_at).getTime() : 0;
 
   if (row.access_token_enc && expires - EXPIRY_SKEW_MS > Date.now()) {
@@ -128,4 +153,20 @@ async function emailsFor(ownerKey) {
   return rows.map(r => r.email);
 }
 
-module.exports = { upsertFromGrant, list, remove, accessTokenFor, emailsFor };
+/**
+ * Which products a stored grant covers, and which it does not.
+ *
+ * Google silently drops a requested scope when its API is not enabled on the
+ * Cloud project, so "we asked for Drive" and "we have Drive" are different
+ * facts. This reports the second one, which is the only one that matters.
+ */
+function productAccess(scopes) {
+  const products = Object.keys(google.PRODUCT_SCOPES);
+  return {
+    granted: products.filter(p => scopes && grantCovers(scopes, p)),
+    missing: scopes ? products.filter(p => !grantCovers(scopes, p)) : [],
+    recorded: Boolean(scopes),
+  };
+}
+
+module.exports = { upsertFromGrant, list, remove, accessTokenFor, emailsFor, productAccess, _internal: { grantCovers } };

@@ -1,9 +1,11 @@
 /**
  * Thin Gmail REST v1 client.
  *
- * Deliberately dependency-free — Node's global fetch is enough, and pulling in
- * googleapis for these endpoints would be a large tree for no gain.
+ * Transport, URL building and the bounded-concurrency helper are shared with
+ * the Calendar, Drive, People and Tasks clients — see google_http.
  */
+
+const http = require('./google_http');
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -11,52 +13,10 @@ const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 // cannot swamp a conversation. The cut is flagged, never silent.
 const MAX_BODY_CHARS = 60000;
 
-/**
- * Build a Gmail API URL.
- *
- * Array values become repeated parameters, not a comma-joined one: Gmail
- * expects metadataHeaders=From&metadataHeaders=Subject&… and silently returns
- * a message with no headers at all if given "From,Subject" as a single value.
- */
-function buildUrl(path, query) {
-  const url = new URL(`${BASE}${path}`);
-  if (!query) return url;
+const { mapLimit, DETAIL_CONCURRENCY } = http;
 
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') continue;
-
-    if (Array.isArray(value)) {
-      for (const item of value) url.searchParams.append(key, String(item));
-    } else {
-      url.searchParams.set(key, String(value));
-    }
-  }
-  return url;
-}
-
-async function call(accessToken, path, { method = 'GET', query, body } = {}) {
-  const url = buildUrl(path, query);
-
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-
-  if (!res.ok) {
-    const text   = await res.text().catch(() => '');
-    let   detail = `HTTP ${res.status}`;
-    try { detail = JSON.parse(text).error?.message || detail; } catch { /* keep status */ }
-    throw new Error(`Gmail API ${method} ${path}: ${detail}`);
-  }
-
-  if (res.status === 204) return null;
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
+const call     = http.clientFor('Gmail API', BASE);
+const buildUrl = call.url;
 
 const header = (msg, name) =>
   msg.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
@@ -166,15 +126,123 @@ async function searchMessages(accessToken, { query, maxResults = 10, pageToken }
   if (!ids.length) return { messages: [], nextPageToken: null };
 
   // Metadata format keeps these cheap — full bodies come from get_message.
-  const detailed = await Promise.all(ids.map(id =>
+  const detailed = await mapLimit(ids, DETAIL_CONCURRENCY, id =>
     call(accessToken, `/messages/${id}`, {
       query: { format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] },
     }).catch(() => null),
-  ));
+  );
+
+  const messages = detailed.filter(Boolean).map(summarize);
 
   return {
-    messages: detailed.filter(Boolean).map(summarize),
+    messages,
     nextPageToken: listed.nextPageToken || null,
+    // A dropped detail fetch is reported, never passed off as "no such message".
+    ...(detailed.length - messages.length ? { unavailable: detailed.length - messages.length } : {}),
+  };
+}
+
+/**
+ * Split an address-list header into individual addresses.
+ *
+ * A quoted display name may itself contain a comma ("Kim, Jamie" <j@x.com>),
+ * so a bare split on "," would cut one address in half. Track quoting and
+ * angle brackets and only break on the commas that actually separate.
+ */
+function parseAddresses(value) {
+  const out = [];
+  let current = '';
+  let quoted  = false;
+  let angled  = false;
+
+  for (const ch of value || '') {
+    if (ch === '"') quoted = !quoted;
+    else if (ch === '<' && !quoted) angled = true;
+    else if (ch === '>' && !quoted) angled = false;
+    else if (ch === ',' && !quoted && !angled) {
+      if (current.trim()) out.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) out.push(current.trim());
+  return out;
+}
+
+/** The bare address out of "Name <a@b.com>", lowercased, for deduping. */
+function addressOf(entry) {
+  const angled = entry.match(/<([^>]+)>/);
+  return (angled ? angled[1] : entry).trim().toLowerCase();
+}
+
+/**
+ * Collapse a whole thread into one row: who is in it, how many messages, and
+ * where it currently stands. Built from metadata-format messages, so no body
+ * is fetched.
+ */
+function summarizeThread(thread) {
+  const messages = thread.messages || [];
+  const first    = messages[0] || {};
+  const last     = messages[messages.length - 1] || {};
+
+  const participants = [];
+  const seen         = new Set();
+  for (const msg of messages) {
+    for (const field of ['From', 'To', 'Cc']) {
+      for (const entry of parseAddresses(header(msg, field))) {
+        const key = addressOf(entry);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        participants.push(entry);
+      }
+    }
+  }
+
+  return {
+    id:            thread.id,
+    subject:       header(first, 'Subject'),
+    participants,
+    message_count: messages.length,
+    first_date:    header(first, 'Date'),
+    last_date:     header(last, 'Date'),
+    last_from:     header(last, 'From'),
+    snippet:       decodeEntities(last.snippet || ''),
+    labels:        [...new Set(messages.flatMap(m => m.labelIds || []))],
+    unread_count:  messages.filter(m => (m.labelIds || []).includes('UNREAD')).length,
+  };
+}
+
+/**
+ * Search conversations rather than messages. Same Gmail query syntax; a thread
+ * matches when any message in it does, and comes back whole.
+ */
+async function searchThreads(accessToken, { query, maxResults = 10, pageToken }) {
+  const listed = await call(accessToken, '/threads', {
+    query: {
+      q: query,
+      maxResults: Math.min(Math.max(maxResults, 1), 50),
+      pageToken,
+    },
+  });
+
+  const ids = (listed.threads || []).map(t => t.id);
+  if (!ids.length) return { threads: [], nextPageToken: null };
+
+  // Metadata format: headers and label ids only, so summarising a 40-message
+  // thread costs no more than a short one.
+  const detailed = await mapLimit(ids, DETAIL_CONCURRENCY, id =>
+    call(accessToken, `/threads/${id}`, {
+      query: { format: 'metadata', metadataHeaders: ['From', 'To', 'Cc', 'Subject', 'Date'] },
+    }).catch(() => null),
+  );
+
+  const threads = detailed.filter(Boolean).map(summarizeThread);
+
+  return {
+    threads,
+    nextPageToken: listed.nextPageToken || null,
+    ...(detailed.length - threads.length ? { unavailable: detailed.length - threads.length } : {}),
   };
 }
 
@@ -444,7 +512,7 @@ const deleteDraft = (accessToken, draftId) =>
 const getProfile = (accessToken) => call(accessToken, '/profile');
 
 module.exports = {
-  searchMessages, getMessage, getThread, getAttachmentData,
+  searchMessages, searchThreads, getMessage, getThread, getAttachmentData,
   sendMessage, getReplyContext, forwardMessage,
   modifyLabels, modifyThreadLabels,
   listLabels, createLabel, updateLabel, deleteLabel,
@@ -452,5 +520,6 @@ module.exports = {
   listDrafts, getDraft, createDraft, updateDraft, sendDraft, deleteDraft,
   getProfile,
   MAX_BODY_CHARS,
-  _internal: { buildMime, extractBody, encodeHeader, buildUrl, decodeEntities, collectAttachments, truncateBody },
+  _internal: { buildMime, extractBody, encodeHeader, buildUrl, decodeEntities, collectAttachments, truncateBody,
+              parseAddresses, addressOf, summarizeThread, mapLimit },
 };

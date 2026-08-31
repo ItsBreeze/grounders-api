@@ -25,7 +25,7 @@ const expectThrow = async (n, fn, needle) => {
   await pool.query("DELETE FROM gmail_accounts WHERE owner_key = 'testowner'");
 
   await expectThrow('no accounts → clear guidance',
-    () => resolveAccount('testowner', undefined), 'No mailboxes are linked');
+    () => resolveAccount('testowner', undefined), 'No accounts are linked');
 
   for (const email of ['brisebyme@gmail.com', 'work@company.com', 'josh.personal@gmail.com']) {
     await accounts.upsertFromGrant({ ownerKey:'testowner', email, googleSub:'sub-'+email,
