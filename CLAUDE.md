@@ -12,10 +12,15 @@ own file at the repository root, titled with the application's name:
 | Component | Documentation |
 |---|---|
 | Grounders API | `README.md` |
-| Google Multi-Account Connector | `GOOGLE-CONNECTOR.md` |
 
-Decisions and their reasoning go in `PROJECT-LOG.md` — the why behind a choice
-does not survive in a diff, and it is what you need when changing that choice.
+A component that grows its own deployment, credentials and release cadence has
+outgrown this repository and should move to its own — as the Google
+Multi-Account Connector did. Leave a short pointer in the root README when that
+happens, so the lineage stays findable.
+
+Decisions and their reasoning belong in a `PROJECT-LOG.md` beside the code they
+explain — the why behind a choice does not survive in a diff, and it is what you
+need when changing that choice.
 
 The root README links to each of them in a short section near the end, saying
 what the component is and how it relates to the API, and nothing more. The

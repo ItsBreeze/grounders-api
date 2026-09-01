@@ -355,6 +355,17 @@ CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
 CREATE INDEX IF NOT EXISTS idx_radio_files_group     ON radio_files(group_id);
 
 
+-- ─── Google Multi-Account Connector (moved out) ────────────────────────────
+-- The connector now lives in its own repository and creates its own schema:
+--   https://github.com/ItsBreeze/google-multi-account-mcp
+--
+-- Its four tables (gmail_accounts, mcp_oauth_clients, mcp_auth_codes,
+-- mcp_refresh_tokens) are deliberately NOT dropped here. They hold live
+-- encrypted Google tokens, and dropping them would unlink every account. If
+-- the connector points at this same database they stay in use; if it has been
+-- given its own, they can be dropped by hand once nothing reads them.
+
+
 -- ─── App Review backdoor user ──────────────────────────────────────────────
 -- Pre-seeded user for App Store / Play Console reviewers. The
 -- /auth/verify-otp shortcut uses APP_REVIEW_PHONE / APP_REVIEW_OTP env
