@@ -19,7 +19,8 @@
     "test:drive-parity": "node test/drive_parity.test.js",
     "test:reach": "node test/shared_drives_recurrence.test.js",
     "test:ownership": "node test/ownership.test.js",
-    "smoke": "node test/smoke_live.js"
+    "smoke": "node test/smoke_live.js",
+    "test:otp": "node --test test/auth-otp.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
