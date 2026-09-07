@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs>
+    <filter id="tsh" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="9"/>
+      <feOffset dx="0" dy="7" result="o"/>
+      <feFlood flood-color="#000" flood-opacity="0.35"/>
+      <feComposite in2="o" operator="in"/>
+    </filter></defs><rect width="1024" height="1024" fill="#1B1A17"/>
+  <clipPath id="tclip"><rect x="182" y="182" width="660" height="660" rx="64"/></clipPath>
+  <rect x="182" y="182" width="660" height="660" rx="64" fill="#000" filter="url(#tsh)"/>
+  <rect x="182" y="182" width="660" height="660" rx="64" fill="#FBF9F5" stroke="#1B1A17" stroke-width="14"/>
+  <g clip-path="url(#tclip)" stroke="#1B1A17" stroke-width="24" stroke-linecap="round">
+    <g transform="translate(512 512) rotate(12)">
+      <line x1="-90" y1="-500" x2="-90" y2="500"/>
+      <line x1="-500" y1="-60" x2="500" y2="-60"/>
+    </g>
+  </g>
+  <circle cx="572" cy="572" r="236" fill="#000" filter="url(#tsh)"/>
+  <circle cx="572" cy="572" r="162" fill="#1B1A17"/>
+  
+  <path d="M 572 339 a 233 233 0 1 0 0.001 0 z M 572 423 a 149 149 0 1 1 -0.001 0 z" fill="#3A7D44"/>
+  <circle cx="572" cy="572" r="228" fill="none" stroke="#1B1A17" stroke-width="16"/>
+  <circle cx="572" cy="572" r="154" fill="none" stroke="#1B1A17" stroke-width="16"/>
+</svg>

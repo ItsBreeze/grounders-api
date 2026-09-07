@@ -172,6 +172,13 @@ run('mcp', async () => {
   const consent = await h.request('GET', `/oauth/authorize?${authQs}`);
   check('authorize renders the phone form for a known client', consent.status === 200 && /name="phone"/.test(consent.text) && /Grounders/.test(consent.text), consent.status);
   check('consent HTML is never cached', consent.headers.get('cache-control') === 'no-store, must-revalidate', consent.headers.get('cache-control'));
+  // Both apps' real icons, inlined from their generators' SVG output: the
+  // Grounders map tile (its ink streets) and the Radio (its ON AIR sign).
+  check('the consent page carries both apps\' marks, ground rects stripped',
+    (consent.text.match(/<svg class="mark"/g) || []).length === 2
+      && /ON AIR/.test(consent.text) && /rx="64" fill="#FBF9F5"/.test(consent.text)
+      && !/<rect width="1024" height="1024"/.test(consent.text),
+    (consent.text.match(/<svg class="mark"/g) || []).length);
 
   const badRedirect = await h.request('GET', `/oauth/authorize?client_id=${CLIENT.client_id}&redirect_uri=${encodeURIComponent('https://evil.example/cb')}&code_challenge=${CHALLENGE}`);
   check('authorize with an unregistered redirect renders an error, never redirects', badRedirect.status === 400 && /Bad redirect/.test(badRedirect.text), badRedirect.status);

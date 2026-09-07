@@ -11,6 +11,8 @@
  * accounts through the OAuth flow.
  */
 
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
@@ -97,23 +99,43 @@ router.post('/oauth/register', registerLimiter, async (req, res, next) => {
   }
 });
 
-// ─── Brand mark ──────────────────────────────────────────────────────────────
-// The suite lockup Grounders and Radio share (see grounders/tool/icon): a paper
-// map tile with the forest-green ring on it. Drawn as vector so it scales.
-const MARK = `<svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <rect x="4" y="4" width="56" height="56" rx="12" fill="#ECE6D6"/>
-  <path d="M4 22 C 20 18, 30 30, 60 24" stroke="#D3CBB8" stroke-width="2" fill="none"/>
-  <path d="M10 60 C 18 44, 34 46, 44 30" stroke="#D3CBB8" stroke-width="2" fill="none"/>
-  <path d="M40 4 C 36 20, 48 28, 60 40" stroke="#D3CBB8" stroke-width="2" fill="none"/>
-  <circle cx="32" cy="32" r="13" fill="none" stroke="#1D9E75" stroke-width="6"/>
-  <circle cx="32" cy="32" r="3.5" fill="#1D9E75"/>
-</svg>`;
+// ─── Brand marks ─────────────────────────────────────────────────────────────
+// The two apps' real icons, copied verbatim from their generators
+// (grounders/tool/icon/generate.js → assets/icon/app_icon.svg and
+// grounders-radio/assets/icon/generate.py → app_icon.svg) into src/assets.
+// Both are the suite's reversed lockup: paper on the shared ink ground, with
+// the O's face cut through to the ground. The page is painted that same ink,
+// so here the 1024-canvas ground rect is stripped and the viewBox cropped to
+// the glyph; the cut-through faces then read as holes in the page, which is
+// the point of the construction. Regenerate the apps' icons and re-copy;
+// never edit the SVGs here.
+const ASSETS = path.join(__dirname, '..', 'assets');
+const INK = '#1B1A17';
 
+function mark(file, viewBox, cls) {
+  return fs.readFileSync(path.join(ASSETS, file), 'utf8')
+    .replace(/<\?xml[^>]*\?>\s*/, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<rect width="1024" height="1024" fill="#1B1A17"\/>\s*/, '')
+    .replace(/<svg[^>]*>/, `<svg class="${cls}" viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">`)
+    .replace(/\s+/g, ' ');
+}
+
+// Grounders: the paper map tile spans 182–842 with a short soft shadow.
+const GROUNDERS_MARK = mark('grounders-icon.svg', '156 160 712 720', 'mark');
+// Radio: body 72–952 × 248–862 plus the antenna up to y=64.
+const RADIO_MARK = mark('radio-icon.svg', '48 52 928 832', 'mark');
+
+// Favicon: the two apps' O rings side by side — Grounders' pine, Radio's
+// blue — each the construction their own favicons use.
 const FAVICON = Buffer.from(
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-    <rect x="4" y="4" width="56" height="56" rx="12" fill="#ECE6D6"/>
-    <circle cx="32" cy="32" r="13" fill="none" stroke="#1D9E75" stroke-width="7"/>
-    <circle cx="32" cy="32" r="4" fill="#1D9E75"/>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512">
+    <path d="M 256 59 a 197 197 0 1 0 0.001 0 z M 256 133 a 123 123 0 1 1 -0.001 0 z" fill="#3A7D44"/>
+    <circle cx="256" cy="256" r="195" fill="none" stroke="${INK}" stroke-width="12"/>
+    <circle cx="256" cy="256" r="125" fill="none" stroke="${INK}" stroke-width="12"/>
+    <path fill="#2E7BFF" fill-rule="evenodd" d="M 768 56 a 200 200 0 1 0 0.001 0 z M 768 136 a 120 120 0 1 1 -0.001 0 z"/>
+    <circle cx="768" cy="256" r="200" fill="none" stroke="${INK}" stroke-width="12"/>
+    <circle cx="768" cy="256" r="120" fill="none" stroke="${INK}" stroke-width="12"/>
   </svg>`, 'utf8',
 ).toString('base64');
 
@@ -122,47 +144,56 @@ const FAVICON = Buffer.from(
 const page = (title, body) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} · Grounders</title>
+<title>${title} · Grounders + Radio</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,${FAVICON}">
 <style>
+  /* The suite's reversed lockup: paper on ink (offhand/BRAND.md). Pine is
+     Grounders' accent, blue is Radio's; each colours the "o" in its name,
+     the way both apps' own wordmarks do. */
   :root { color-scheme: dark; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-         background:#12161f; color:#F3F1EA; font:16px/1.55 -apple-system,system-ui,sans-serif;
+         background:${INK}; color:#F5F1EA; font:16px/1.55 -apple-system,system-ui,sans-serif;
          padding:20px; box-sizing:border-box; }
-  .card { width:100%; max-width:380px; padding:30px 28px; background:#1a1f2e;
-          border:1px solid #2A3140; border-radius:16px; }
-  .brand { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
-  .brand .mark { height:26px; width:26px; display:block; }
-  .brand .word { font-weight:700; font-size:20px; letter-spacing:-.01em; }
-  .brand .word span { color:#9AA3B2; font-weight:500; }
+  .wrap { width:100%; max-width:380px; }
+  .brand { display:flex; align-items:center; gap:14px; margin:0 4px 18px; }
+  .brand .mark { height:44px; width:auto; display:block; flex:0 0 auto; }
+  .brand .word { font-weight:700; font-size:21px; letter-spacing:-.01em; white-space:nowrap;
+                 margin-left:4px; }
+  .brand .word .plus { color:#9B948A; font-weight:500; margin:0 .18em; }
+  .brand .word .g { color:#4FA35E; font-style:normal; }
+  .brand .word .b { color:#2E7BFF; font-style:normal; }
+  .card { padding:30px 28px; background:#26241F; border:1px solid #3A3730; border-radius:16px; }
   .row { display:flex; gap:10px; align-items:stretch; margin-bottom:14px; }
   .row input { margin-bottom:0; flex:1 1 auto; min-width:0; }
-  select { box-sizing:border-box; flex:0 0 64px; width:64px; background:#12161f;
-           border:1px solid #2A3140; border-radius:10px; padding:13px 4px;
-           color:#F3F1EA; font-size:16px; text-align:center; text-align-last:center;
+  select { box-sizing:border-box; flex:0 0 64px; width:64px; background:${INK};
+           border:1px solid #3A3730; border-radius:10px; padding:13px 4px;
+           color:#F5F1EA; font-size:16px; text-align:center; text-align-last:center;
            -webkit-appearance:none; -moz-appearance:none; appearance:none; }
-  select:focus { outline:none; border-color:#1D9E75; }
+  select:focus { outline:none; border-color:#4FA35E; }
   h1 { font-size:22px; margin:0 0 8px; }
-  p { color:#9AA3B2; margin:0 0 22px; }
-  label { display:block; font-size:13px; color:#9AA3B2; margin-bottom:6px; }
-  input { width:100%; box-sizing:border-box; background:#12161f; border:1px solid #2A3140;
-          border-radius:10px; padding:13px 14px; color:#F3F1EA; font-size:16px; margin-bottom:14px; }
-  input:focus { outline:none; border-color:#1D9E75; }
-  button { width:100%; background:#1D9E75; border:0; border-radius:10px; padding:14px;
+  p { color:#9B948A; margin:0 0 22px; }
+  label { display:block; font-size:13px; color:#9B948A; margin-bottom:6px; }
+  input { width:100%; box-sizing:border-box; background:${INK}; border:1px solid #3A3730;
+          border-radius:10px; padding:13px 14px; color:#F5F1EA; font-size:16px; margin-bottom:14px; }
+  input:focus { outline:none; border-color:#4FA35E; }
+  button { width:100%; background:#3A7D44; border:0; border-radius:10px; padding:14px;
            color:#fff; font-size:16px; font-weight:600; cursor:pointer; }
-  button:active { background:#3A7D44; }
+  button:active { background:#2C6B3A; }
   .err { background:#3A1F22; color:#F5B5AE; border-radius:8px;
          padding:10px 12px; font-size:14px; margin-bottom:16px; }
-  .grant { background:#16302A; border:1px solid #1F4A3E; border-radius:10px;
-           padding:14px; font-size:14px; color:#CFE6DB; margin-bottom:20px; }
-  .grant strong { color:#F3F1EA; font-weight:600; }
-  strong { color:#F3F1EA; }
-</style></head><body><div class="card">
+  .grant { background:#1F2E22; border:1px solid #2C4A32; border-radius:10px;
+           padding:14px; font-size:14px; color:#CFE6D3; margin-bottom:20px; }
+  .grant strong { color:#F5F1EA; font-weight:600; }
+  strong { color:#F5F1EA; }
+</style></head><body><div class="wrap">
   <div class="brand">
-    ${MARK}
-    <span class="word">Grounders <span>+ Radio</span></span>
+    ${GROUNDERS_MARK}
+    ${RADIO_MARK}
+    <span class="word">Gr<i class="g">o</i>unders<span class="plus">+</span>Radi<i class="b">o</i></span>
   </div>
+  <div class="card">
   ${body}
+  </div>
 </div>
 <script>
 (function () {
