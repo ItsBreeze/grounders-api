@@ -87,6 +87,8 @@ router.delete('/me', async (req, res, next) => {
 });
 
 // GET /users/:id/friends — must come before generic /:id route.
+// Returns id, display_name and is_mutual only. Phone numbers stay out: any
+// user can call this for any target, and the client never reads them here.
 router.get('/:id/friends', async (req, res, next) => {
   try {
     const myId = req.user.id;
@@ -95,7 +97,6 @@ router.get('/:id/friends', async (req, res, next) => {
       `SELECT
          u.id,
          u.display_name,
-         u.phone,
          EXISTS (
            SELECT 1 FROM friendships f2
            WHERE (f2.user_id_a = $1 AND f2.user_id_b = u.id)

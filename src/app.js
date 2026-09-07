@@ -30,10 +30,24 @@ app.use(cors({
 
 app.use(express.json({ limit: '1mb' }));
 
+// Sending codes costs SMS money, so this one is tight. It guards
+// /auth/request-otp only â€” see the mounts below.
 const otpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: { error: 'Too many OTP requests — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Guessing codes is what this one limits, so only failed attempts count: a
+// correct code is refunded, and a user who mistypes once, resends and then
+// verifies has not spent the window.
+const verifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many verification attempts â€” try again in 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -49,7 +63,11 @@ app.use(generalLimiter);
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.use('/auth',                     otpLimiter, authRoutes);
+// Each auth step has its own bucket. /auth/refresh sits under generalLimiter
+// alone: it runs on every app launch and must never be starved by a sign-in.
+app.use('/auth/request-otp',         otpLimiter);
+app.use('/auth/verify-otp',          verifyLimiter);
+app.use('/auth',                     authRoutes);
 app.use('/users',                    userRoutes);
 app.use('/posts',                    postRoutes);
 app.use('/posts/:postId/reactions',  reactionRoutes);
