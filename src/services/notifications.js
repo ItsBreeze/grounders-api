@@ -119,7 +119,9 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
       notification: { title, body },
       data: stringData,
       apns: {
-        payload: { aps: { sound: 'default', 'mutable-content': 1 } },
+        // badge: 1 puts a "something is waiting" marker on the iOS icon; both
+        // iOS apps clear it when they come to the foreground.
+        payload: { aps: { sound: 'default', 'mutable-content': 1, badge: 1 } },
       },
       android: {
         priority: 'high',
