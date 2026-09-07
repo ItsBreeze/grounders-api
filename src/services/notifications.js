@@ -45,15 +45,19 @@ async function sendToUser(userId, payload) {
   return sendToUsers([userId], payload);
 }
 
-async function sendToUsers(userIds, { title, body, data = {} }) {
+// `app` picks which client's tokens to hit: 'grounders' (default), 'radio',
+// or null for every token the user has (friend requests show in both).
+async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' }) {
   if (!initialized) return { sent: 0, failed: 0, skipped: true };
   if (!Array.isArray(userIds) || !userIds.length) return { sent: 0, failed: 0 };
 
   let tokens;
   try {
     const { rows } = await pool.query(
-      `SELECT token FROM device_tokens WHERE user_id = ANY($1)`,
-      [userIds]
+      `SELECT token FROM device_tokens
+        WHERE user_id = ANY($1)
+          AND ($2::text IS NULL OR app = $2)`,
+      [userIds, app]
     );
     tokens = rows.map(r => r.token);
   } catch (err) {

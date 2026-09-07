@@ -192,6 +192,20 @@ router.get('/workspaces', async (req, res, next) => {
       `SELECT w.id, w.name, w.color, w.owner_id, w.created_at,
               (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count,
               (SELECT MAX(created_at) FROM radio_files f WHERE f.workspace_id = w.id) AS last_activity_at,
+              -- Unread = posted by someone else since I last opened the
+              -- workspace (or since I joined, if never opened). Drives the
+              -- red flashing tile on the dial.
+              (SELECT COUNT(*)::int FROM radio_files f
+                WHERE f.workspace_id = w.id AND f.owner_id != $1
+                  AND f.created_at > COALESCE(m.last_read_at, m.joined_at)) AS unread_count,
+              (SELECT COUNT(*)::int FROM radio_files f
+                WHERE f.workspace_id = w.id AND f.owner_id != $1 AND f.kind = 'voice_note'
+                  AND f.created_at > COALESCE(m.last_read_at, m.joined_at)) AS unread_memo_count,
+              (SELECT uu.display_name FROM radio_files f
+                 JOIN users uu ON uu.id = f.owner_id
+                WHERE f.workspace_id = w.id AND f.owner_id != $1
+                  AND f.created_at > COALESCE(m.last_read_at, m.joined_at)
+                ORDER BY f.created_at DESC LIMIT 1) AS last_unread_from,
               COALESCE((
                 SELECT json_agg(json_build_object(
                   'user_id', mm.user_id,
@@ -208,6 +222,21 @@ router.get('/workspaces', async (req, res, next) => {
       [myId]
     );
     res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// POST /radio/workspaces/:id/read — mark everything in the workspace as
+// seen by me. Called when the workspace screen loads; clears the unread
+// counts (and the dial's red flash) for this workspace.
+router.post('/workspaces/:id/read', async (req, res, next) => {
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE radio_workspace_members SET last_read_at = NOW()
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Workspace not found' });
+    res.json({ read: true });
   } catch (err) { next(err); }
 });
 
@@ -258,6 +287,7 @@ router.post('/workspaces', async (req, res, next) => {
         return notifications.sendToUsers(invitedIds, {
           title: `Added to ${wsName}`,
           body:  `${creatorName} added you to a Radio workspace`,
+          app:   'radio',
           data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId },
         });
       })());
@@ -433,6 +463,7 @@ router.post('/workspaces/:id/members', async (req, res, next) => {
         return notifications.sendToUser(newId, {
           title: `Added to ${wsName}`,
           body:  `${adderName} added you to a Radio workspace`,
+          app:   'radio',
           data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId },
         });
       })());
@@ -608,6 +639,7 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
 
       return notifications.sendToUsers(recipientIds, {
         title, body,
+        app: 'radio',
         data: {
           type: isMemo ? 'radio_voice_memo' : 'radio_file',
           workspace_id: wsId,
@@ -667,6 +699,7 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
       return notifications.sendToUsers(recipientIds, {
         title: `${senderName} (${wsName})`,
         body:  preview,
+        app:   'radio',
         data:  {
           type: 'radio_text',
           workspace_id: wsId,

@@ -123,6 +123,7 @@ router.post('/requests', async (req, res, next) => {
       const { rows } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
       const senderName = rows[0]?.display_name?.trim() || 'Someone';
       return notifications.sendToUser(toUserId, {
+        app:   null, // both apps surface friend requests
         title: 'New friend request',
         body:  `${senderName} wants to be friends`,
         data:  {
@@ -213,6 +214,7 @@ async function acceptRequest(requestId, acceptingUserId, res) {
       const { rows } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [acceptingUserId]);
       const accepterName = rows[0]?.display_name?.trim() || 'Someone';
       return notifications.sendToUser(fr.from_user_id, {
+        app:   null,
         title: 'Friend request accepted',
         body:  `You and ${accepterName} are now friends`,
         data:  {

@@ -212,6 +212,11 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
 
+-- Which client app registered the token. Radio pushes only go to radio
+-- tokens (and vice versa) so a user with both apps on one phone doesn't
+-- get every message twice.
+ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS app TEXT NOT NULL DEFAULT 'grounders';
+
 
 -- ─── Reports ───────────────────────────────────────────────────────────────
 -- User-submitted reports on posts. Required by Apple/Google for any app
@@ -288,6 +293,10 @@ CREATE TABLE IF NOT EXISTS radio_workspace_members (
 );
 
 CREATE INDEX IF NOT EXISTS idx_radio_members_user ON radio_workspace_members(user_id);
+
+-- Per-member read marker for unread counts on the dial. NULL = never
+-- opened; the workspace list treats joined_at as the baseline then.
+ALTER TABLE radio_workspace_members ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ;
 
 
 -- ─── Radio: files (voice notes + uploaded files) ───────────────────────────
