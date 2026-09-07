@@ -288,7 +288,8 @@ router.post('/workspaces', async (req, res, next) => {
           title: `Added to ${wsName}`,
           body:  `${creatorName} added you to a Radio workspace`,
           app:   'radio',
-          data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId },
+          data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId,
+                   workspace_name: wsName },
         });
       })());
     }
@@ -464,7 +465,8 @@ router.post('/workspaces/:id/members', async (req, res, next) => {
           title: `Added to ${wsName}`,
           body:  `${adderName} added you to a Radio workspace`,
           app:   'radio',
-          data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId },
+          data:  { type: 'radio_workspace_added', workspace_id: wsId, from_user_id: myId,
+                   workspace_name: wsName },
         });
       })());
     }
@@ -645,6 +647,10 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
           workspace_id: wsId,
           file_id: row.id,
           from_user_id: myId,
+          sender_name: senderName,
+          workspace_name: wsName,
+          is_group: recipientIds.length > 1,
+          filename: isMemo ? '' : (filename || ''),
         },
       });
     })());
@@ -705,6 +711,10 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
           workspace_id: wsId,
           file_id: row.id,
           from_user_id: myId,
+          sender_name: senderName,
+          workspace_name: wsName,
+          is_group: recipientIds.length > 1,
+          preview,
         },
       });
     })());

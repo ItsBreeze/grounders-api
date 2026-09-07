@@ -47,73 +47,91 @@ async function sendToUser(userId, payload) {
 
 // `app` picks which client's tokens to hit: 'grounders' (default), 'radio',
 // or null for every token the user has (friend requests show in both).
+//
+// Radio's Android build renders its own conversation-style notification
+// (sender avatar, per-workspace grouping) from a DATA-ONLY message; a
+// `notification` block would make Android show a second, generic one. So
+// radio+android tokens get title/body inside `data`, everything else keeps
+// the `notification` block so iOS, web and the Grounders app display as
+// before. The app only self-renders when the message has no notification
+// block, so the two paths can't double up.
 async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' }) {
   if (!initialized) return { sent: 0, failed: 0, skipped: true };
   if (!Array.isArray(userIds) || !userIds.length) return { sent: 0, failed: 0 };
 
-  let tokens;
+  let rows;
   try {
-    const { rows } = await pool.query(
-      `SELECT token FROM device_tokens
+    ({ rows } = await pool.query(
+      `SELECT token, platform FROM device_tokens
         WHERE user_id = ANY($1)
           AND ($2::text IS NULL OR app = $2)`,
       [userIds, app]
-    );
-    tokens = rows.map(r => r.token);
+    ));
   } catch (err) {
     console.error('[notifications] token lookup failed:', err.message);
     return { sent: 0, failed: 0 };
   }
-
-  if (!tokens.length) return { sent: 0, failed: 0 };
+  if (!rows.length) return { sent: 0, failed: 0 };
 
   const stringData = {};
   for (const [k, v] of Object.entries(data)) {
     if (v !== null && v !== undefined) stringData[k] = String(v);
   }
 
+  const selfRendered = rows.filter(r => app === 'radio' && r.platform === 'android').map(r => r.token);
+  const systemRendered = rows.filter(r => !(app === 'radio' && r.platform === 'android')).map(r => r.token);
+
   const CHUNK_SIZE = 500;
   const invalidTokens = [];
   let totalSent = 0;
   let totalFailed = 0;
 
-  for (let i = 0; i < tokens.length; i += CHUNK_SIZE) {
-    const chunk = tokens.slice(i, i + CHUNK_SIZE);
-    try {
-      const response = await admin.messaging().sendEachForMulticast({
-        tokens: chunk,
-        notification: { title, body },
-        data: stringData,
-        apns: {
-          payload: { aps: { sound: 'default', 'mutable-content': 1 } },
-        },
-        android: {
-          priority: 'high',
-          notification: { sound: 'default', channelId: 'grounders_default' },
-        },
-      });
-
-      totalSent   += response.successCount;
-      totalFailed += response.failureCount;
-
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const code = resp.error?.code;
-          if (
-            code === 'messaging/registration-token-not-registered' ||
-            code === 'messaging/invalid-registration-token' ||
-            code === 'messaging/invalid-argument'
-          ) {
-            invalidTokens.push(chunk[idx]);
-          } else {
-            console.warn('[notifications] send error:', code, resp.error?.message);
+  async function multicast(tokens, message) {
+    for (let i = 0; i < tokens.length; i += CHUNK_SIZE) {
+      const chunk = tokens.slice(i, i + CHUNK_SIZE);
+      try {
+        const response = await admin.messaging().sendEachForMulticast({ ...message, tokens: chunk });
+        totalSent   += response.successCount;
+        totalFailed += response.failureCount;
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            const code = resp.error?.code;
+            if (
+              code === 'messaging/registration-token-not-registered' ||
+              code === 'messaging/invalid-registration-token' ||
+              code === 'messaging/invalid-argument'
+            ) {
+              invalidTokens.push(chunk[idx]);
+            } else {
+              console.warn('[notifications] send error:', code, resp.error?.message);
+            }
           }
-        }
-      });
-    } catch (err) {
-      console.error('[notifications] multicast failed:', err.message);
-      totalFailed += chunk.length;
+        });
+      } catch (err) {
+        console.error('[notifications] multicast failed:', err.message);
+        totalFailed += chunk.length;
+      }
     }
+  }
+
+  if (systemRendered.length) {
+    await multicast(systemRendered, {
+      notification: { title, body },
+      data: stringData,
+      apns: {
+        payload: { aps: { sound: 'default', 'mutable-content': 1 } },
+      },
+      android: {
+        priority: 'high',
+        notification: { sound: 'default', channelId: 'grounders_default' },
+      },
+    });
+  }
+  if (selfRendered.length) {
+    await multicast(selfRendered, {
+      data: { ...stringData, title: String(title ?? ''), body: String(body ?? '') },
+      android: { priority: 'high' },
+    });
   }
 
   if (invalidTokens.length) {
