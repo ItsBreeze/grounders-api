@@ -177,3 +177,69 @@ needs permission is not a brake.
   `list_accounts` reports which products each grant actually covers.
 - `npm run smoke` is a read-only live check against the deployment, allow-listed
   by construction, reporting counts rather than contents.
+
+---
+
+# Project log — Grounders + Radio MCP Connector
+
+## 1 — One connector for two apps, shaped like Offhand's
+
+Grounders and Radio share this API, this database and this `users` table, so
+one MCP server covers both; a second URL would be a second consent screen for
+the same account. It is built to the same shape as Offhand's connector —
+OAuth 2.1 with dynamic registration, phone-code consent, `search`/`fetch`
+named for ChatGPT's contract — so a person with both adds two URLs and gets an
+assistant that answers across notes, posts and messages without learning two
+systems. A literal single URL spanning Offhand's separate database was
+considered and rejected: it would need a gateway that mints tokens valid on
+two services with two user tables, for no gain the assistant can see.
+
+## 2 — The signing key, again
+
+The retired Gmail connector's log recorded why MCP tokens must never be signed
+with `JWT_SECRET` itself: `middleware/auth.js` checks no audience, so a
+connector token signed with the raw secret is a full app session. That rule
+was kept verbatim (HMAC-derived key, plus an `aud` claim for good measure),
+and `test:mcp` asserts both directions. Offhand relies on the audience claim
+alone because its app middleware checks audiences; this one does not, so the
+derived key is the guarantee and the claim is defence in depth.
+
+## 3 — Reads mirror the apps' rules; nothing is written
+
+Every post query carries the same four exclusions the map feed applies —
+archived, blocked either way, deletion pending, and the friend scope — and the
+suite reads them off the SQL sent to the pool rather than trusting the JSON.
+The connector writes nothing at all: reading a thread does not mark it read
+and does not set `radio_enabled`, because an assistant skimming a
+conversation on the user's behalf is not the user opening it, and the dial's
+red flash exists for the user.
+
+Phone numbers and emails never leave the server, including the user's own.
+The consent page says so, in the grant text, before the code is entered.
+
+## 4 — Photos as images, places as coordinates, voice left out
+
+A caption is usually empty, so a post's `fetch` returns the picture itself as
+an image content block — the 480 px thumbnail the app already uploads for
+pins, ≈50 KB, is enough to say what is in a photo. The full original is a
+parameter, capped at 3 MB, because tool results ride inside the model's
+context.
+
+Posts carry lat/lng and nothing else about place; the app stores no address
+text by design. Rather than add a geocoder (and a dependency, and a leak of
+every post's location to a third party), the assistant is told to interpret
+coordinates itself and to supply coordinates for a place name in `feed.near`.
+Assistants are good at this and the user's data stays here.
+
+Voice notes are omitted, not linked. The assistant cannot listen, and a URL
+to an audio file is an invitation to guess at what was said. The count
+omitted is reported so a gap in a thread is visible, and a flag lists them as
+placeholders so a conversation still reads in order.
+
+## 5 — Accounts pending deletion
+
+Signing in to the app cancels a pending deletion. The connector refuses such
+an account at consent and answers 403 with an explanation after connecting,
+rather than cancelling the deletion the way an app sign-in would: a person who
+asked for their account to be removed should not have that reversed by asking
+Claude a question.

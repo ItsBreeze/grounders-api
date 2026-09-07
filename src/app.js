@@ -17,10 +17,20 @@ const blockRoutes    = require('./routes/blocks');
 const reportRoutes   = require('./routes/reports');
 const radioRoutes    = require('./routes/radio');
 const inviteRoutes   = require('./routes/invites');
+const mcpOauthRoutes = require('./routes/mcp_oauth');
+const mcpRoutes      = require('./routes/mcp');
 
 require('./services/notifications');
 
 const app = express();
+
+// Railway terminates TLS at its edge and forwards each request with a single
+// X-Forwarded-For hop. Trusting exactly that hop makes req.ip the caller's
+// address instead of the edge's, so the limiters below key per user rather
+// than putting every user in one bucket. It must be a hop count, not `true`:
+// `true` would let a caller pick its own key by sending the header itself,
+// and express-rate-limit refuses it (ERR_ERL_PERMISSIVE_TRUST_PROXY).
+app.set('trust proxy', 1);
 
 app.use(cors({
   origin: process.env.CORS_ORIGIN || '*',
@@ -31,7 +41,7 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 
 // Sending codes costs SMS money, so this one is tight. It guards
-// /auth/request-otp only â€” see the mounts below.
+// /auth/request-otp only — see the mounts below.
 const otpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -47,7 +57,7 @@ const verifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   skipSuccessfulRequests: true,
-  message: { error: 'Too many verification attempts â€” try again in 15 minutes' },
+  message: { error: 'Too many verification attempts — try again in 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -78,6 +88,13 @@ app.use('/upload-url',               uploadRoutes);
 app.use('/devices',                  deviceRoutes);
 app.use('/radio',                    radioRoutes);
 app.use('/invites',                  inviteRoutes);
+
+// The MCP connector: Claude, ChatGPT and Gemini reach Grounders + Radio
+// through here. Mounted at the root because OAuth discovery lives at fixed
+// /.well-known paths that cannot be nested — and BEFORE blockRoutes, whose
+// root-mounted requireAuth would otherwise answer these with the app's 401.
+app.use('/',                         mcpOauthRoutes);
+app.use('/',                         mcpRoutes);
 
 app.use('/',                         blockRoutes);
 

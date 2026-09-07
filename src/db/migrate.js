@@ -364,6 +364,52 @@ CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
 CREATE INDEX IF NOT EXISTS idx_radio_files_group     ON radio_files(group_id);
 
 
+-- ─── OAuth (for the MCP connector) ─────────────────────────────────────────
+-- Claude, ChatGPT and Gemini reach a user's Grounders + Radio through one MCP
+-- server (routes/mcp.js), and all three authenticate with OAuth 2.1. Claude
+-- Desktop performs Dynamic Client Registration on every connect with no
+-- fallback, so clients register themselves here rather than being provisioned
+-- by hand. Distinct from the old mcp_* tables of the retired Gmail connector.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id      TEXT        PRIMARY KEY,
+  client_name    TEXT,
+  redirect_uris  JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Authorization codes are single-use and short-lived. PKCE is mandatory:
+-- these clients are public and a code intercepted without the verifier must
+-- be worthless.
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code                  TEXT        PRIMARY KEY,
+  client_id             TEXT        NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  user_id               UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  redirect_uri          TEXT        NOT NULL,
+  code_challenge        TEXT        NOT NULL,
+  code_challenge_method TEXT        NOT NULL DEFAULT 'S256',
+  scope                 TEXT        NOT NULL DEFAULT 'grounders.read',
+  expires_at            TIMESTAMPTZ NOT NULL,
+  consumed_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_codes_expiry ON oauth_codes(expires_at);
+
+-- Refresh tokens are stored hashed — a database read must not yield a working
+-- credential. Access tokens are JWTs and are not stored at all. Deleting the
+-- user cascades here, so a closed account's connectors stop at the reaper.
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+  token_hash TEXT        PRIMARY KEY,
+  client_id  TEXT        NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+  user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scope      TEXT        NOT NULL DEFAULT 'grounders.read',
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user ON oauth_refresh_tokens(user_id);
+
+
 -- ─── App Review backdoor user ──────────────────────────────────────────────
 -- Pre-seeded user for App Store / Play Console reviewers. The
 -- /auth/verify-otp shortcut uses APP_REVIEW_PHONE / APP_REVIEW_OTP env

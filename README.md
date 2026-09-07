@@ -160,16 +160,18 @@ protected_zones     — lat/lng only, 500m radius default
 
 ---
 
-## Google Multi-Account Connector
+## Grounders + Radio MCP Connector
 
-This repository also hosts the **Google Multi-Account Connector** — a remote MCP
-server that gives Claude access to several Google accounts at once (Gmail,
-Calendar, Drive, Contacts and Tasks), where the first-party connectors each hold
-exactly one.
+`POST /mcp` is a Model Context Protocol server: a user adds this API's URL as a
+custom connector in Claude, ChatGPT or Gemini, signs in once with their phone
+number, and their assistant can then read their Grounders posts (including the
+photos), friends, and Radio messages and files mid-conversation. Read-only, no
+voice notes, no phone numbers. Both apps share this API, so one connector
+covers both — built to the same shape as Offhand's, so the two sit side by
+side in an assistant's connector list.
 
-It is self-contained: its own tables, env vars and route prefixes, with no foreign
-keys into the Grounders schema. Nothing above depends on it, and without its env
-vars its routes answer `503` while the rest of the API runs unaffected.
+It adds three OAuth tables and one optional env var (`PUBLIC_BASE_URL`), and
+its routes are mounted at the root ahead of everything else that lives there.
 
-Its documentation lives in **[GOOGLE-CONNECTOR.md](GOOGLE-CONNECTOR.md)** — setup,
-the 54 tools, security notes and tests.
+Its documentation lives in **[MCP-CONNECTOR.md](MCP-CONNECTOR.md)** — the
+tools, what they apply, auth, configuration and tests (`npm run test:mcp`).

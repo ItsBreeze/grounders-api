@@ -203,6 +203,13 @@ router.post('/verify-otp', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The MCP connector's consent page signs people in with the same code flow
+// (routes/mcp_oauth.js). It reuses this module's Twilio client rather than
+// building a third one, so "is SMS on" has exactly one answer.
+router.generateOtp = generateOtp;
+router.sendSms = sendSms;
+router.smsEnabled = () => twilioClient !== null;
+
 router.post('/refresh', async (req, res, next) => {
   try {
     const { refresh_token } = req.body;

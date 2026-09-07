@@ -12,7 +12,7 @@ own file at the repository root, titled with the application's name:
 | Component | Documentation |
 |---|---|
 | Grounders API | `README.md` |
-| Google Multi-Account Connector | `GOOGLE-CONNECTOR.md` |
+| Grounders + Radio MCP Connector | `MCP-CONNECTOR.md` |
 
 Decisions and their reasoning go in `PROJECT-LOG.md` — the why behind a choice
 does not survive in a diff, and it is what you need when changing that choice.
