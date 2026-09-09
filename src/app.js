@@ -19,6 +19,7 @@ const radioRoutes    = require('./routes/radio');
 const inviteRoutes   = require('./routes/invites');
 const mcpOauthRoutes = require('./routes/mcp_oauth');
 const mcpRoutes      = require('./routes/mcp');
+const partnerRoutes  = require('./routes/partner');
 
 require('./services/notifications');
 
@@ -95,6 +96,9 @@ app.use('/invites',                  inviteRoutes);
 // root-mounted requireAuth would otherwise answer these with the app's 401.
 app.use('/',                         mcpOauthRoutes);
 app.use('/',                         mcpRoutes);
+// Offhand's built-in Grounders + Radio: a shared-key endpoint that issues the
+// same connector tokens for a phone Offhand has already verified.
+app.use('/',                         partnerRoutes);
 
 app.use('/',                         blockRoutes);
 

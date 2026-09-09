@@ -89,6 +89,20 @@ async function registerClient({ client_name, redirect_uris }) {
   };
 }
 
+/**
+ * A fixed, first-party client row — the Offhand partner link uses one. Public
+ * like every other client, with no redirect URIs: it never goes through the
+ * authorization page, only /oauth/token's refresh grant.
+ */
+async function ensureClient({ clientId, clientName }) {
+  await pool.query(
+    `INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+     VALUES ($1, $2, '[]'::jsonb)
+     ON CONFLICT (client_id) DO NOTHING`,
+    [clientId, clientName],
+  );
+}
+
 async function getClient(clientId) {
   if (!clientId) return null;
   const { rows } = await pool.query(
@@ -184,6 +198,17 @@ async function refresh({ refreshToken, clientId }) {
   return issueTokens({ userId: row.user_id, clientId, scope: row.scope });
 }
 
+/** Revoke one refresh token. Idempotent: an unknown or already-revoked token
+ * is a no-op, since the caller's intent — "this grant must not work" — holds
+ * either way. */
+async function revokeRefreshToken({ refreshToken, clientId }) {
+  await pool.query(
+    `UPDATE oauth_refresh_tokens SET revoked_at = NOW()
+      WHERE token_hash = $1 AND client_id = $2 AND revoked_at IS NULL`,
+    [sha256(refreshToken), clientId],
+  );
+}
+
 /** Verify a connector access token. Rejects app tokens by key AND audience. */
 function verifyAccessToken(token) {
   const payload = jwt.verify(token, signingKey(), { audience: MCP_AUDIENCE });
@@ -191,6 +216,7 @@ function verifyAccessToken(token) {
 }
 
 module.exports = {
-  registerClient, getClient, redirectAllowed, issueCode, redeemCode,
-  refresh, verifyAccessToken, randomToken, sha256, SCOPE, MCP_AUDIENCE,
+  registerClient, ensureClient, getClient, redirectAllowed, issueCode, redeemCode,
+  issueTokens, refresh, revokeRefreshToken, verifyAccessToken, randomToken, sha256,
+  SCOPE, MCP_AUDIENCE,
 };

@@ -170,8 +170,11 @@ voice notes, no phone numbers. Both apps share this API, so one connector
 covers both — built to the same shape as Offhand's, so the two sit side by
 side in an assistant's connector list.
 
-It adds three OAuth tables and one optional env var (`PUBLIC_BASE_URL`), and
-its routes are mounted at the root ahead of everything else that lives there.
+It adds three OAuth tables and two optional env vars (`PUBLIC_BASE_URL`, and
+`OFFHAND_PARTNER_KEY` for Offhand's built-in link, which issues the same
+connector tokens for a phone Offhand has already verified), and its routes are
+mounted at the root ahead of everything else that lives there.
 
 Its documentation lives in **[MCP-CONNECTOR.md](MCP-CONNECTOR.md)** — the
-tools, what they apply, auth, configuration and tests (`npm run test:mcp`).
+tools, what they apply, auth, the Offhand link, configuration and tests
+(`npm run test:mcp`, `npm run test:partner`).

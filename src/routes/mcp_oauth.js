@@ -20,6 +20,7 @@ const { v4: uuid } = require('uuid');
 const pool = require('../db/pool');
 const oauth = require('../services/mcp_oauth');
 const authRoutes = require('./auth');
+const { phoneFrom } = require('../utils/phone');
 
 const router = express.Router();
 
@@ -234,24 +235,6 @@ function escapeHtml(s) {
 const hidden = (params) => Object.entries(params)
   .map(([k, v]) => `<input type="hidden" name="${k}" value="${escapeHtml(v ?? '')}">`)
   .join('');
-
-/**
- * Phones are coerced toward E.164 so "780-901-1304" matches a stored
- * "+17809011304". North-American default; international users pick their
- * code from the list. Returns null when there is nothing usable.
- */
-function phoneFrom(raw) {
-  let d = String(raw || '').replace(/[^\d+]/g, '');
-  if (!d.replace(/\D/g, '')) return null;
-  if (!d.startsWith('+')) {
-    if (d.length === 10) d = `+1${d}`;
-    else if (d.length === 11 && d.startsWith('1')) d = `+${d}`;
-    else d = `+${d}`;
-  }
-  const digits = d.replace(/\D/g, '');
-  if (digits.length < 10 || digits.length > 15) return null;
-  return `+${digits}`;
-}
 
 // Country dialing codes for the connect form's picker, +1 default. Kept short —
 // the common ones — rather than an exhaustive ISO list.

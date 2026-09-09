@@ -243,3 +243,30 @@ an account at consent and answers 403 with an explanation after connecting,
 rather than cancelling the deletion the way an app sign-in would: a person who
 asked for their account to be removed should not have that reversed by asking
 Claude a question.
+
+## 6 — Offhand links by phone, not by consent page
+
+Offhand's in-app assistant wanted Grounders and Radio the way Claude already
+has them. The cheap version — Offhand calling Grounders' app routes with an
+app token — was rejected: it would need a full app session for a read-only
+job, and every visibility rule the connector encodes would have to be
+re-encoded on the other side. So Offhand is an MCP client of `/mcp` like any
+other, and the only new thing is how it gets a token.
+
+A user with both apps has already proven their phone number to Offhand, by
+the same texted-code flow this API uses. Making them prove it again on a
+consent page, inside their own app, buys nothing. `POST /partner/offhand/link`
+takes a shared key and a phone and hands back what the consent page would
+have issued: a refresh token for a fixed `offhand` client, hashed and
+rotating like every other, whose access tokens carry the connector audience
+and are signed with the derived key. Nothing about the grant is more
+privileged than one a consent page produced; the difference is confined to
+who vouched for the phone, and that is one file.
+
+The key is compared in constant time, must be at least 32 characters, and an
+unset key means 503 — a partner endpoint that fell open on a missing variable
+would be an unauthenticated "give me a token for this phone". When the numbers
+differ, Offhand texts the second number a code of its own before asking; from
+here that is the same assertion. Linking never creates an account and refuses
+an account pending deletion, as the consent page does and for the same
+reasons.
