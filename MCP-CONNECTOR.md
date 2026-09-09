@@ -9,7 +9,9 @@ assistant can read their posts, friends and messages mid-conversation.
 It is the same design as Offhand's connector — same protocol, same OAuth
 shape, same consent flow — so a user with both adds two URLs and gets one
 assistant that can answer across notes, posts and messages. Grounders and
-Radio share this API and this database, so they share one connector.
+Radio share this API and this database, so they share one connector. Offhand's
+own in-app assistant reads through it too, linked by phone number rather than
+a consent page — see *Offhand, built in* below.
 
 ```
 Connector URL:  https://<PUBLIC_BASE_URL>/mcp
@@ -144,12 +146,41 @@ answer them with the app's own 401.
 
 ---
 
+## Offhand, built in
+
+Offhand's own assistant reads Grounders and Radio through this same connector
+— as an MCP client of `POST /mcp`, with the same tools and the same visibility
+rules — but its users never see the consent page. Offhand signs people in with
+the same texted-code flow this API does, so a number Offhand has verified is
+one this API can trust. Offhand's server presents a shared key and the phone,
+and receives what the consent page would have issued.
+
+| Path | Role |
+|---|---|
+| `POST /partner/offhand/link` | `{ phone }` → the connector's tokens for that account (client `offhand`, scope `grounders.read`) plus the display name. 404 `no_account`, 403 `account_closing`, 400 `invalid_phone` |
+| `POST /partner/offhand/unlink` | `{ refresh_token }` → 204, the grant revoked. Idempotent |
+
+Both take `Authorization: Bearer <OFFHAND_PARTNER_KEY>`, compared in constant
+time; a server with the variable unset (or shorter than 32 characters) answers
+503 rather than falling open. The trust decision — "Offhand verified this
+phone" — lives in `src/routes/partner.js` and nowhere else. What comes out is
+an ordinary connector grant: the access token opens `/mcp` and is refused by
+the app's routes, the refresh token is stored hashed and rotates at
+`/oauth/token` like any other, and linking never creates an account. The
+response carries the display name and nothing else about the user. Offhand
+revokes the grant when the user disconnects or deletes their Offhand account.
+
+`test/partner.test.js` asserts all of that — 25 checks, `npm run test:partner`.
+
+---
+
 ## Configuration
 
-One optional variable:
+Two optional variables:
 
 ```
 PUBLIC_BASE_URL=https://grounders-api-production.up.railway.app
+OFFHAND_PARTNER_KEY=            # 32+ chars; unset, /partner/* answers 503
 ```
 
 The discovery documents advertise it verbatim. Unset, the server uses the
@@ -175,7 +206,10 @@ tables of the retired Gmail connector, which are left untouched.
 | `src/mcp/tools.js` | Tool definitions and every query behind them |
 | `src/routes/mcp_oauth.js` | Discovery, registration, consent pages, token endpoint |
 | `src/services/mcp_oauth.js` | Clients, codes, tokens, the derived signing key |
-| `test/mcp.test.js` | 54 checks — `npm run test:mcp` |
+| `src/routes/partner.js` | The Offhand partner link: a verified phone → connector tokens |
+| `src/utils/phone.js` | E.164 coercion shared by the consent page and the partner link |
+| `test/mcp.test.js` | 55 checks — `npm run test:mcp` |
+| `test/partner.test.js` | 25 checks — `npm run test:partner` |
 
 ---
 
