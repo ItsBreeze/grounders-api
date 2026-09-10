@@ -60,14 +60,34 @@ router.post('/partner/offhand/link', requirePartnerKey, async (req, res, next) =
 
     // Match the way the app does (digits only, so formatting never matters),
     // and never create an account here.
+    //
+    // `phone` is UNIQUE on the raw text but this compares digits, so one
+    // person can hold two rows: "+17805550134" and "7805550134" are
+    // different strings and the same number. A bare LIMIT 1 then picks
+    // whichever the planner reached first, and linking the empty twin fails
+    // silently — the app connects, says "Connected as", and every read comes
+    // back empty because the account it is reading has nothing in it. Take
+    // the account that is actually in use, and say so when there was a
+    // choice to make.
     const { rows } = await pool.query(
-      `SELECT id, display_name, deletion_pending_at FROM users
-        WHERE regexp_replace(phone, '\\D', '', 'g') = regexp_replace($1, '\\D', '', 'g')
-        LIMIT 1`,
+      `SELECT u.id, u.display_name, u.deletion_pending_at
+         FROM users u
+        WHERE regexp_replace(u.phone, '\\D', '', 'g') = regexp_replace($1, '\\D', '', 'g')
+        ORDER BY u.last_post_at DESC NULLS LAST,
+                 u.total_distance_m DESC,
+                 u.created_at ASC`,
       [phone],
     );
     const user = rows[0];
     if (!user) return res.status(404).json({ error: 'no_account' });
+    if (rows.length > 1) {
+      // Worth knowing about: two rows hold one person's number in two
+      // formats, so something upstream is not normalising on write.
+      console.warn(
+        '[partner] %d accounts share these phone digits; linked %s',
+        rows.length, user.id,
+      );
+    }
     // Signing in to the app cancels a pending deletion; a link from another
     // app should not quietly do the same.
     if (user.deletion_pending_at) return res.status(403).json({ error: 'account_closing' });
