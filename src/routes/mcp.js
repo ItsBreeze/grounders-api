@@ -5,7 +5,8 @@
  * One endpoint serves Claude, ChatGPT and Gemini — that is the point of the
  * protocol. Streamable HTTP, one JSON-RPC request per POST, which is all these
  * clients send. The model doing the reasoning is the user's own subscription;
- * this server answers database reads and nothing else.
+ * this server answers database reads, and — for a token that carries
+ * grounders.write — sends what the user dictates on Radio.
  *
  * Auth is a connector access token from routes/mcp_oauth.js. An app session
  * token is refused here (different signing key and audience), and a
@@ -16,7 +17,7 @@
 const express = require('express');
 const pool = require('../db/pool');
 const oauth = require('../services/mcp_oauth');
-const { TOOLS, callTool } = require('../mcp/tools');
+const { toolsForScope, callTool } = require('../mcp/tools');
 
 const router = express.Router();
 
@@ -25,13 +26,33 @@ const router = express.Router();
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const SERVER_INFO = { name: 'grounders', version: '1.0.0' };
 
-const INSTRUCTIONS =
+const BASE_INSTRUCTIONS =
   'This connector reads one user\'s Grounders (a location-based photo/video feed '
   + 'shared with friends) and Radio (voice-note, message and file threads with '
-  + 'those same friends). Everything is read-only. Posts carry coordinates, not '
+  + 'those same friends). Posts carry coordinates, not '
   + 'place names — interpret the location yourself. Voice notes are never '
   + 'available; say so rather than guessing what one contained. When you '
   + 'describe a photo, call fetch on the post first so you have actually seen it.';
+
+const READ_ONLY_INSTRUCTIONS = ' Everything here is read-only.';
+
+const WRITE_INSTRUCTIONS =
+  ' This connection can also send on Radio: the radio_send_* tools put a message '
+  + 'or a file into a conversation, and it reaches the other people in it '
+  + 'immediately. Nothing is a draft and there is no outbox. Confirm the '
+  + 'recipient and the exact wording with the user before sending, and say what '
+  + 'was sent afterwards. Grounders itself stays read-only — posts are made from '
+  + 'the camera, in the app.';
+
+/**
+ * `initialize` is answered before any token is read, so it carries the general
+ * description. The scope-accurate one rides on tools/list, alongside the tools
+ * it describes.
+ */
+const INSTRUCTIONS = BASE_INSTRUCTIONS + READ_ONLY_INSTRUCTIONS;
+
+const instructionsFor = (canWrite) =>
+  BASE_INSTRUCTIONS + (canWrite ? WRITE_INSTRUCTIONS : READ_ONLY_INSTRUCTIONS);
 
 /**
  * Bearer token → user. A token outlives the account only in the window
@@ -55,7 +76,7 @@ async function authenticate(req) {
   if (!rows[0]) return { error: 'invalid_token' };
   if (rows[0].deletion_pending_at) return { error: 'account_closing', userId: claims.userId };
 
-  return { userId: claims.userId };
+  return { userId: claims.userId, canWrite: oauth.hasScope(claims.scope, oauth.SCOPE_WRITE) };
 }
 
 /** RFC 9728: point an unauthenticated client at the authorization server. */
@@ -82,9 +103,12 @@ router.post('/mcp', express.json({ limit: '1mb' }), async (req, res, next) => {
     const { id, method, params } = req.body || {};
 
     // `initialize` is answered before auth so a client can discover the
-    // server and be told where to authenticate.
+    // server and be told where to authenticate. A client that already holds a
+    // token sends it here too, and then the instructions can describe the
+    // tools it is actually about to get rather than the cautious default.
     if (method === 'initialize') {
       const asked = params && params.protocolVersion;
+      const early = await authenticate(req).catch(() => ({ error: 'invalid_token' }));
       return res.json({
         jsonrpc: '2.0',
         id,
@@ -92,7 +116,7 @@ router.post('/mcp', express.json({ limit: '1mb' }), async (req, res, next) => {
           protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(asked) ? asked : SUPPORTED_PROTOCOL_VERSIONS[0],
           capabilities: { tools: {} },
           serverInfo: SERVER_INFO,
-          instructions: INSTRUCTIONS,
+          instructions: early.error ? INSTRUCTIONS : instructionsFor(early.canWrite),
         },
       });
     }
@@ -111,13 +135,18 @@ router.post('/mcp', express.json({ limit: '1mb' }), async (req, res, next) => {
     if (auth.error) return challenge(req, res, 'A valid access token is required');
 
     if (method === 'tools/list') {
-      return res.json({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: { tools: toolsForScope(auth.canWrite) },
+      });
     }
 
     if (method === 'tools/call') {
       const { name, arguments: args } = params || {};
       try {
-        return res.json({ jsonrpc: '2.0', id, result: await callTool(auth.userId, name, args || {}) });
+        const out = await callTool(auth.userId, name, args || {}, { canWrite: auth.canWrite });
+        return res.json({ jsonrpc: '2.0', id, result: out });
       } catch (err) {
         console.error(`mcp tool ${name} failed:`, err);
         return res.json({ jsonrpc: '2.0', id, result: toolFailure('That lookup failed.') });

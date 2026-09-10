@@ -6,7 +6,13 @@
  * readable when it is yours, a friend's, or public; a workspace when you are a
  * member; a profile when the app would show it — plus the same exclusions
  * (archived posts, blocks in either direction, accounts pending deletion).
- * Nothing is written, ever: not a read marker, not the radio_enabled flag.
+ *
+ * The reading tools write nothing at all, not even a read marker. The Radio
+ * sending tools at the bottom of the file do write, and are handed out only
+ * to a token carrying `grounders.write` — which today means Offhand's own
+ * app, where the user is already signed in and talking to their assistant.
+ * Third-party assistants connect through the consent page and get the read
+ * set, so nobody's Radio grows a send button by adding a connector.
  *
  * Two tools are named `search` and `fetch` and shaped {id, title, text, url}
  * because ChatGPT's connector mode requires exactly that; Claude and Gemini do
@@ -19,7 +25,11 @@
  * conversation still reads in order.
  */
 
+const dns = require('dns').promises;
+const { randomUUID } = require('crypto');
 const pool = require('../db/pool');
+const notifications = require('../services/notifications');
+const radioSend = require('../services/radio_send');
 const { haversineMetres } = require('../utils/geo');
 const { canonicalPair } = require('../utils/friends');
 
@@ -85,7 +95,7 @@ const TOOLS = [
       + '"what were my friends up to this week", "what did Sam post in August", '
       + 'or "who has been near Whistler". Each post carries who, when (captured '
       + 'and posted), where (lat/lng — interpret the place yourself), the '
-      + 'caption, type, reaction count and a thumbnail URL; call `fetch` on a '
+      + 'caption, type, a thumbnail URL, and who reacted with what; call `fetch` on a '
       + 'post to actually see the picture. Defaults to the last 7 days, friends '
       + 'plus the user, all post types.',
     inputSchema: {
@@ -162,6 +172,137 @@ const TOOLS = [
         include_voice_notes: { type: 'boolean', description: 'List voice notes as placeholders (no audio). Defaults to false.' },
         limit: { type: 'integer', description: 'Max messages, 1-200. Defaults to 50.' },
       },
+    },
+  },
+];
+
+/**
+ * The write half, offered only to a token carrying `grounders.write`.
+ *
+ * Radio only. A Grounders post needs a photo taken at a place at a time and
+ * belongs to the camera in the user's hand; a Radio message is words and
+ * files, which is exactly what an assistant can carry. Everything here is
+ * bounded the same way the app is: you can only write into a conversation you
+ * are a member of, only add people you are already friends with, and only
+ * delete your own messages.
+ *
+ * These land on someone else's phone the moment they run. The descriptions
+ * say so, because a model that treats sending as a draft will send drafts.
+ */
+const WRITE_TOOLS = [
+  {
+    name: 'radio_send_message',
+    description:
+      'Send a text message into a Radio conversation. It is delivered '
+      + 'immediately and pushed to the other members\' phones — there is no '
+      + 'draft state and no undo beyond radio_delete_message. Confirm the '
+      + 'wording and the recipient with the user before calling this. Address '
+      + 'it with `to` (a friend\'s name, for your direct thread with them) or '
+      + '`workspace_id` (from radio_workspaces) for a group.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'A friend\'s display name or user id: sends to your direct thread with them.' },
+        workspace_id: { type: 'string', description: 'A conversation id from radio_workspaces or search.' },
+        text: { type: 'string', description: 'The message, as the user wants it sent. Max 5000 characters.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'radio_send_file',
+    description:
+      'Send a file into a Radio conversation, fetched from a URL you already '
+      + 'have — a photo from a Grounders post (media_url or thumb_url), a file '
+      + 'from another Radio conversation, or a link the user gave you. '
+      + 'Delivered immediately, like radio_send_message; confirm first. Pass '
+      + '`message` to send a line of text with it. Public https URLs only, up '
+      + 'to 20 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'A friend\'s display name or user id: sends to your direct thread with them.' },
+        workspace_id: { type: 'string', description: 'A conversation id from radio_workspaces or search.' },
+        url: { type: 'string', description: 'https URL of the file to send.' },
+        filename: { type: 'string', description: 'What it should be called in the conversation. Defaults to the name in the URL.' },
+        mime_type: { type: 'string', description: 'Overrides what the server serving the file says it is.' },
+        message: { type: 'string', description: 'An optional text message sent alongside the file.' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'radio_start_conversation',
+    description:
+      'Start a Radio conversation: `with` a single friend opens (or returns) '
+      + 'your direct thread with them, and `members` plus a `name` creates a '
+      + 'group. Everyone invited must already be a friend. Creating a group '
+      + 'notifies the people added. Returns the workspace_id to send into.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        with: { type: 'string', description: 'One friend, by name or user id — returns the existing direct thread if there is one.' },
+        name: { type: 'string', description: 'Name for a group conversation.' },
+        members: {
+          type: 'array', items: { type: 'string' },
+          description: 'Friends to add, by name or user id.',
+        },
+      },
+    },
+  },
+  {
+    name: 'radio_add_member',
+    description:
+      'Add a friend to a Radio group you are in. They are notified and can '
+      + 'read everything in it from then on, so confirm with the user first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string', description: 'The conversation to add them to.' },
+        person: { type: 'string', description: 'The friend to add, by name or user id.' },
+      },
+      required: ['workspace_id', 'person'],
+    },
+  },
+  {
+    name: 'radio_rename_conversation',
+    description:
+      'Rename a Radio group the user created. Everyone in it sees the new name. '
+      + 'Only the group\'s owner can rename it, the same rule the app has.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace_id: { type: 'string' },
+        name: { type: 'string', description: 'The new name, up to 100 characters.' },
+      },
+      required: ['workspace_id', 'name'],
+    },
+  },
+  {
+    name: 'radio_mark_read',
+    description:
+      'Clear the unread count on a Radio conversation, as opening it in the '
+      + 'app would. Only do this when the user has actually caught up on it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'A friend\'s name: their direct thread.' },
+        workspace_id: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'radio_delete_message',
+    description:
+      'Delete one of the user\'s own Radio messages — the way to take back '
+      + 'something just sent. It disappears for everyone. Other people\'s '
+      + 'messages cannot be deleted.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'A `message:…` id from radio_messages, search or a send tool.' },
+      },
+      required: ['message_id'],
     },
   },
 ];
@@ -270,6 +411,41 @@ async function resolvePerson(myId, text) {
   throw new ToolError(
     `"${raw}" could be any of: ${rows.map((r) => `${r.display_name} (user:${r.id})`).join(', ')}. Pass the user id.`,
   );
+}
+
+/**
+ * Who reacted to these posts, and with what.
+ *
+ * The feed used to carry a bare count, which is the one thing about a reaction
+ * nobody wants: "3 reactions" tells you nothing, "Ben and Dana" is the whole
+ * point. One query for a page of posts, so a feed of fifty costs one round
+ * trip rather than fifty.
+ */
+async function reactionsFor(postIds) {
+  const byPost = new Map();
+  if (!postIds.length) return byPost;
+  const { rows } = await pool.query(
+    `SELECT r.post_id, r.emoji, r.user_id, u.display_name
+       FROM reactions r JOIN users u ON u.id = r.user_id
+      WHERE r.post_id = ANY($1::uuid[]) AND u.deletion_pending_at IS NULL
+      ORDER BY r.created_at`,
+    [postIds],
+  );
+  for (const r of rows) {
+    const list = byPost.get(r.post_id) || [];
+    list.push({ emoji: r.emoji, by: r.display_name, user_id: r.user_id });
+    byPost.set(r.post_id, list);
+  }
+  return byPost;
+}
+
+/** Hang reactions on a list of already-formatted posts, in place. */
+async function attachReactions(posts) {
+  const byPost = await reactionsFor(posts.map((p) => p.id.replace(/^post:/, '')));
+  for (const p of posts) {
+    p.reactions = byPost.get(p.id.replace(/^post:/, '')) || [];
+  }
+  return posts;
 }
 
 function formatPost(p, near) {
@@ -505,6 +681,7 @@ async function feed(myId, args) {
 
   let posts = rows.map((p) => formatPost(p, near));
   if (near) posts = posts.filter((p) => p.distance_m <= near.radius).slice(0, limit);
+  await attachReactions(posts);
 
   const byPerson = new Map();
   for (const p of posts) {
@@ -748,26 +925,47 @@ async function fetchPost(myId, id, imageMode) {
     if (!ok) return failure('That post is not visible to you.');
   }
 
-  const { rows: reactions } = await pool.query(
-    `SELECT r.emoji, r.user_id, u.display_name FROM reactions r
-       JOIN users u ON u.id = r.user_id WHERE r.post_id = $1 ORDER BY r.created_at`,
-    [post.id],
-  );
+  // One shape for reactions everywhere — `by` is the name — so a client never
+  // has to know two field names for the same thing.
+  const reactions = (await reactionsFor([post.id])).get(post.id) || [];
 
   const shaped = { ...formatPost(post), archived: !!post.archived_at, reactions };
   const extra = [];
   if (imageMode !== 'none' && post.type !== 'audio') {
-    // Video: the thumbnail is the only still there is. Photo: thumb (480px,
-    // ~50 KB) unless full was asked for.
-    const url = (post.type === 'video' || imageMode !== 'full')
-      ? (post.media_thumb_url || (post.type === 'photo' ? post.media_url : null))
-      : post.media_url;
-    const got = await fetchBinary(url, IMAGE_CAP_BYTES);
-    if (got && got.buf) {
+    // In order of preference, and every one of them tried.
+    //
+    // A post made before thumbnails shipped still carries a media_thumb_url
+    // that 404s — the Grounders app has always known this and falls back to
+    // the full photo (pinImageCandidates in lib/services/boot_warmup.dart).
+    // This did not, so on those posts the assistant was told the picture
+    // "could not be downloaded" while the picture was sitting right there.
+    //
+    // A video is the exception: its media_url is the video file, which is not
+    // an image and would only be downloaded to discover that. If a video has
+    // no still, it has nothing to show.
+    const candidates = post.type === 'video'
+      ? [post.media_thumb_url]
+      : (imageMode === 'full'
+        ? [post.media_url, post.media_thumb_url]
+        : [post.media_thumb_url, post.media_url]);
+
+    let attached = null;
+    let lastMiss = null;
+    for (const url of candidates.filter(Boolean)) {
+      const got = await fetchBinary(url, IMAGE_CAP_BYTES);
+      if (got && got.buf) { attached = { got, url }; break; }
+      lastMiss = got;
+    }
+
+    if (attached) {
+      const { got, url } = attached;
       extra.push(image(got.buf, isImageMime(got.mimeType) ? got.mimeType : (guessMime(url) || 'image/jpeg')));
       shaped.image = { attached: true, source: url === post.media_url ? 'full' : 'thumb' };
     } else {
-      shaped.image = { attached: false, reason: got && got.tooLarge ? `too large (${got.bytes} bytes)` : 'could not be downloaded' };
+      shaped.image = {
+        attached: false,
+        reason: lastMiss && lastMiss.tooLarge ? `too large (${lastMiss.bytes} bytes)` : 'could not be downloaded',
+      };
     }
   }
   return result(shaped, extra);
@@ -830,7 +1028,7 @@ async function fetchUser(myId, id) {
     posts: u.post_count,
     total_distance_km: Math.round((parseFloat(u.total_distance_m) || 0) / 100) / 10,
     last_post_at: u.last_post_at,
-    recent_posts: posts.map((p) => formatPost(p)),
+    recent_posts: await attachReactions(posts.map((p) => formatPost(p))),
     shared_radio_workspaces: shared,
     url: `grounders://user/${u.id}`,
   });
@@ -928,9 +1126,358 @@ async function fetchAny(myId, args) {
   }
 }
 
+// ─── Writes ──────────────────────────────────────────────────────────────────
+
+/**
+ * Which conversation a write is aimed at. `workspace_id` names it outright;
+ * `to` (or `with`) names a person and means the direct thread with them.
+ * Membership is checked here, once, for every write tool.
+ */
+async function resolveWorkspace(myId, args, { create = false } = {}) {
+  let wsId = args.workspace_id ? String(args.workspace_id).replace(/^workspace:/i, '').trim().toLowerCase() : null;
+
+  if (!wsId && (args.to || args.with)) {
+    const person = await resolvePerson(myId, args.to || args.with);
+    if (person.self) throw new ToolError('That is you. Name the conversation with workspace_id.');
+    const { rows } = await pool.query(
+      `SELECT w.id
+         FROM radio_workspaces w
+         JOIN radio_workspace_members ma ON ma.workspace_id = w.id AND ma.user_id = $1
+         JOIN radio_workspace_members mb ON mb.workspace_id = w.id AND mb.user_id = $2
+        WHERE (SELECT COUNT(*) FROM radio_workspace_members m WHERE m.workspace_id = w.id) = 2
+        ORDER BY w.created_at DESC LIMIT 1`,
+      [myId, person.id],
+    );
+    if (rows.length) return { wsId: rows[0].id, person };
+    if (!create) {
+      throw new ToolError(
+        `No direct Radio thread with ${person.display_name || person.id} yet. `
+        + 'Call radio_start_conversation to open one.',
+      );
+    }
+    return { wsId: await createWorkspace(myId, { memberIds: [person.id] }), person, created: true };
+  }
+
+  if (!wsId) throw new ToolError('Say who this is for: `to` for a friend, or `workspace_id` for a group.');
+  if (!UUID_RE.test(wsId)) throw new ToolError('workspace_id is not a valid id.');
+  if (!(await isMember(wsId, myId))) throw new ToolError('No such conversation, or you are not a member.');
+  return { wsId };
+}
+
+/** Create a workspace with the caller and the given friends in it. */
+async function createWorkspace(myId, { name = '', memberIds = [] }) {
+  for (const id of memberIds) {
+    if (id === myId) continue;
+    if (!(await areFriends(myId, id))) throw new ToolError('You can only start a conversation with a friend.');
+  }
+  const wsId = randomUUID();
+  await pool.query(
+    `INSERT INTO radio_workspaces (id, owner_id, name) VALUES ($1, $2, $3)`,
+    [wsId, myId, String(name || '').slice(0, 100)],
+  );
+  const all = Array.from(new Set([myId, ...memberIds]));
+  for (const id of all) {
+    await pool.query(
+      `INSERT INTO radio_workspace_members (workspace_id, user_id, added_by)
+       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [wsId, id, myId],
+    );
+  }
+  const invited = all.filter((id) => id !== myId);
+  if (invited.length) {
+    notifications.fireAndForget((async () => {
+      const { rows: [me_] } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
+      const creatorName = me_?.display_name?.trim() || 'Someone';
+      const wsName = String(name || '').trim() || 'a workspace';
+      return notifications.sendToUsers(invited, {
+        title: `Added to ${wsName}`,
+        body: `${creatorName} added you to a Radio workspace`,
+        app: 'radio',
+        data: {
+          type: 'radio_workspace_added', workspace_id: wsId,
+          from_user_id: myId, workspace_name: wsName,
+        },
+      });
+    })());
+  }
+  return wsId;
+}
+
+/**
+ * A URL the connector is willing to fetch on the user's behalf.
+ *
+ * The address comes from a model, which got it from a tool result or from
+ * something a person typed, so it is not trusted to point outward: https
+ * only, and every hop resolved and checked against the private ranges before
+ * it is requested. Redirects are followed by hand for the same reason —
+ * letting fetch follow them would put the check on the first URL only.
+ */
+async function assertPublicHttps(raw) {
+  let url;
+  try { url = new URL(raw); } catch { throw new ToolError(`Not a URL: ${raw}`); }
+  if (url.protocol !== 'https:') throw new ToolError('Only https URLs can be sent.');
+
+  let addresses;
+  try {
+    addresses = await dns.lookup(url.hostname, { all: true });
+  } catch {
+    throw new ToolError(`Could not resolve ${url.hostname}.`);
+  }
+  for (const { address, family } of addresses) {
+    if (isPrivateAddress(address, family)) {
+      throw new ToolError('That address is not reachable from here.');
+    }
+  }
+  return url;
+}
+
+function isPrivateAddress(address, family) {
+  if (family === 6) {
+    const a = address.toLowerCase();
+    if (a === '::1' || a === '::') return true;
+    if (a.startsWith('fe80') || a.startsWith('fc') || a.startsWith('fd')) return true;
+    // IPv4-mapped (::ffff:10.0.0.1) carries an IPv4 address to check.
+    const mapped = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateAddress(mapped[1], 4);
+    return false;
+  }
+  const p = address.split('.').map(Number);
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n))) return true;
+  const [a, b] = p;
+  return a === 0 || a === 10 || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || a >= 224;
+}
+
+/** Download a file to send, following redirects one checked hop at a time. */
+async function downloadForSend(raw) {
+  let target = await assertPublicHttps(raw);
+  for (let hop = 0; hop < 4; hop += 1) {
+    const res = await fetch(target, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(radioSend.DOWNLOAD_TIMEOUT_MS),
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      target = await assertPublicHttps(new URL(res.headers.get('location'), target).toString());
+      continue;
+    }
+    if (!res.ok) throw new ToolError(`That file could not be downloaded (${res.status}).`);
+    const declared = parseInt(res.headers.get('content-length') || '0');
+    if (declared > radioSend.SEND_FILE_CAP_BYTES) {
+      throw new ToolError(`That file is ${declared} bytes; 20 MB is the limit for sending.`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > radioSend.SEND_FILE_CAP_BYTES) {
+      throw new ToolError(`That file is ${buf.length} bytes; 20 MB is the limit for sending.`);
+    }
+    return { buf, mimeType: (res.headers.get('content-type') || '').split(';')[0] || null, url: target };
+  }
+  throw new ToolError('That URL redirected too many times.');
+}
+
+/**
+ * Only the messages this code wrote are safe to hand back — they were phrased
+ * for the model. Anything else (an S3 client's error, say) names infrastructure
+ * and goes to the log instead.
+ */
+function sendFailure(err, what) {
+  if (err.status) return new ToolError(err.message);
+  console.error(`radio ${what} failed:`, err);
+  return new ToolError(`That could not be sent just now.`);
+}
+
+/** Turn a send's row into what the model should see it as. */
+function sentMessage(row, wsId) {
+  return {
+    sent: true,
+    message_id: `message:${row.id}`,
+    workspace_id: wsId,
+    at: row.created_at,
+    ...(row.text_content ? { text: row.text_content } : {}),
+    ...(row.filename ? { filename: row.filename } : {}),
+    ...(row.url ? { url: row.url } : {}),
+  };
+}
+
+async function memberNames(wsId, exceptId) {
+  const { rows } = await pool.query(
+    `SELECT u.display_name FROM radio_workspace_members m
+       JOIN users u ON u.id = m.user_id
+      WHERE m.workspace_id = $1 AND m.user_id <> $2
+      ORDER BY u.display_name`,
+    [wsId, exceptId],
+  );
+  return rows.map((r) => r.display_name).filter(Boolean);
+}
+
+async function radioSendMessage(myId, args) {
+  const text = String(args.text || '').trim();
+  if (!text) throw new ToolError('text is required.');
+  const { wsId } = await resolveWorkspace(myId, args, { create: true });
+  let row;
+  try {
+    row = await radioSend.sendText({ userId: myId, workspaceId: wsId, content: text });
+  } catch (err) {
+    throw sendFailure(err, 'send');
+  }
+  return result({ ...sentMessage(row, wsId), delivered_to: await memberNames(wsId, myId) });
+}
+
+async function radioSendFile(myId, args) {
+  const raw = String(args.url || '').trim();
+  if (!raw) throw new ToolError('Give the https url of the file to send.');
+  // Fetched before the conversation is resolved, because resolving can create
+  // a thread and a failed download should not leave an empty one behind.
+  const got = await downloadForSend(raw);
+  const { wsId } = await resolveWorkspace(myId, args, { create: true });
+
+  const filename = String(args.filename || '').trim()
+    || decodeURIComponent(got.url.pathname.split('/').pop() || '').slice(0, 200)
+    || 'file';
+  const mimeType = String(args.mime_type || '').trim() || got.mimeType || 'application/octet-stream';
+
+  let file;
+  try {
+    file = await radioSend.uploadAndSend({
+      userId: myId, workspaceId: wsId, buffer: got.buf, filename, mimeType,
+    });
+  } catch (err) {
+    throw sendFailure(err, 'file send');
+  }
+
+  const out = { ...sentMessage(file, wsId), size_bytes: file.size_bytes != null ? Number(file.size_bytes) : null };
+  const note = String(args.message || '').trim();
+  if (note) {
+    const row = await radioSend.sendText({ userId: myId, workspaceId: wsId, content: note });
+    out.message = sentMessage(row, wsId);
+  }
+  out.delivered_to = await memberNames(wsId, myId);
+  return result(out);
+}
+
+async function radioStartConversation(myId, args) {
+  const asked = Array.isArray(args.members) ? args.members : [];
+  const name = String(args.name || '').trim();
+
+  if (args.with && !asked.length) {
+    const { wsId, person, created } = await resolveWorkspace(myId, { to: args.with }, { create: true });
+    return result({
+      workspace_id: wsId,
+      with: person?.display_name || null,
+      created: !!created,
+      note: created ? 'New direct thread.' : 'You already had a direct thread with them.',
+    });
+  }
+
+  if (!asked.length) throw new ToolError('Give `with` for a direct thread, or `members` for a group.');
+  const people = [];
+  for (const who of asked) people.push(await resolvePerson(myId, who));
+  const memberIds = Array.from(new Set(people.map((p) => p.id).filter((id) => id !== myId)));
+  if (!memberIds.length) throw new ToolError('A group needs at least one other person.');
+
+  const wsId = await createWorkspace(myId, { name, memberIds });
+  return result({
+    workspace_id: wsId,
+    name: name || null,
+    created: true,
+    members: await memberNames(wsId, myId),
+  });
+}
+
+async function radioAddMember(myId, args) {
+  const { wsId } = await resolveWorkspace(myId, args);
+  const person = await resolvePerson(myId, args.person);
+  if (person.self) throw new ToolError('You are already in it.');
+  if (!(await areFriends(myId, person.id))) throw new ToolError('You can only add a friend.');
+
+  const { rows } = await pool.query(
+    `INSERT INTO radio_workspace_members (workspace_id, user_id, added_by)
+     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING user_id`,
+    [wsId, person.id, myId],
+  );
+  if (!rows.length) return result({ added: false, workspace_id: wsId, note: 'They were already in it.' });
+
+  notifications.fireAndForget((async () => {
+    const { rows: [me_] } = await pool.query(`SELECT display_name FROM users WHERE id = $1`, [myId]);
+    const { rows: [ws] } = await pool.query(`SELECT name FROM radio_workspaces WHERE id = $1`, [wsId]);
+    const wsName = ws?.name?.trim() || 'a workspace';
+    return notifications.sendToUser(person.id, {
+      title: `Added to ${wsName}`,
+      body: `${me_?.display_name?.trim() || 'Someone'} added you to a Radio workspace`,
+      app: 'radio',
+      data: {
+        type: 'radio_workspace_added', workspace_id: wsId,
+        from_user_id: myId, workspace_name: wsName,
+      },
+    });
+  })());
+
+  return result({ added: true, workspace_id: wsId, person: person.display_name || person.id });
+}
+
+async function radioRenameConversation(myId, args) {
+  const { wsId } = await resolveWorkspace(myId, args);
+  const name = String(args.name || '').trim().slice(0, 100);
+  if (!name) throw new ToolError('name is required.');
+  // owner_id in the WHERE clause, matching PATCH /radio/workspaces/:id: a
+  // member can send in a group, its owner names it.
+  const { rows } = await pool.query(
+    `UPDATE radio_workspaces SET name = $2 WHERE id = $1 AND owner_id = $3 RETURNING id, name`,
+    [wsId, name, myId],
+  );
+  if (!rows.length) return failure('Only the person who created that group can rename it.');
+  return result({ renamed: true, workspace_id: wsId, name: rows[0].name });
+}
+
+async function radioMarkRead(myId, args) {
+  const { wsId } = await resolveWorkspace(myId, args);
+  await pool.query(
+    `UPDATE radio_workspace_members SET last_read_at = NOW()
+      WHERE workspace_id = $1 AND user_id = $2`,
+    [wsId, myId],
+  );
+  return result({ marked_read: true, workspace_id: wsId });
+}
+
+async function radioDeleteMessage(myId, args) {
+  const id = String(args.message_id || '').replace(/^message:/i, '').trim().toLowerCase();
+  if (!UUID_RE.test(id)) throw new ToolError('message_id is not a valid id.');
+
+  // owner_id in the WHERE clause is the whole permission check: you can only
+  // delete what you sent.
+  const { rows } = await pool.query(
+    `WITH del AS (
+       DELETE FROM radio_files WHERE id = $1 AND owner_id = $2
+       RETURNING id, r2_key, size_bytes, workspace_id, kind
+     ), bump AS (
+       UPDATE users
+          SET radio_storage_used_bytes = GREATEST(0, radio_storage_used_bytes - (SELECT COALESCE(size_bytes, 0) FROM del))
+        WHERE id = $2 AND EXISTS (SELECT 1 FROM del)
+     )
+     SELECT * FROM del`,
+    [id, myId],
+  );
+  if (!rows.length) return failure('No message with that id that you sent. You can only delete your own.');
+  radioSend.deleteObject(rows[0].r2_key);
+  return result({ deleted: true, message_id: `message:${id}`, workspace_id: rows[0].workspace_id });
+}
+
 // ─── Dispatch ────────────────────────────────────────────────────────────────
 
-async function callTool(myId, name, args = {}) {
+const WRITE_TOOL_NAMES = new Set(WRITE_TOOLS.map((t) => t.name));
+
+/** The tools a token may see. Read is always there; write is earned. */
+function toolsForScope(canWrite) {
+  return canWrite ? [...TOOLS, ...WRITE_TOOLS] : TOOLS;
+}
+
+async function callTool(myId, name, args = {}, { canWrite = false } = {}) {
+  if (WRITE_TOOL_NAMES.has(name) && !canWrite) {
+    return failure('This connection can read Grounders and Radio but not write to them.');
+  }
   try {
     switch (name) {
       case 'search': return await search(myId, args);
@@ -940,6 +1487,13 @@ async function callTool(myId, name, args = {}) {
       case 'me': return await me(myId);
       case 'radio_workspaces': return await radioWorkspaces(myId);
       case 'radio_messages': return await radioMessages(myId, args);
+      case 'radio_send_message': return await radioSendMessage(myId, args);
+      case 'radio_send_file': return await radioSendFile(myId, args);
+      case 'radio_start_conversation': return await radioStartConversation(myId, args);
+      case 'radio_add_member': return await radioAddMember(myId, args);
+      case 'radio_rename_conversation': return await radioRenameConversation(myId, args);
+      case 'radio_mark_read': return await radioMarkRead(myId, args);
+      case 'radio_delete_message': return await radioDeleteMessage(myId, args);
       default: return failure(`Unknown tool: ${name}`);
     }
   } catch (err) {
@@ -948,4 +1502,4 @@ async function callTool(myId, name, args = {}) {
   }
 }
 
-module.exports = { TOOLS, callTool, ToolError };
+module.exports = { TOOLS, WRITE_TOOLS, toolsForScope, callTool, ToolError };

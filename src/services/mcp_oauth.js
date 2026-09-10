@@ -28,7 +28,41 @@ const jwt = require('jsonwebtoken');
 const pool = require('../db/pool');
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
-const SCOPE = 'grounders.read';
+
+/**
+ * Two scopes. Reading is what the consent page offers and what every
+ * third-party assistant gets: Claude, ChatGPT and Gemini connect through
+ * dynamic registration, so their grant must stay the safe one — nobody's
+ * Radio should gain a "send" button because they added a connector.
+ *
+ * Writing is granted only to a partner client whose grants come from the
+ * partner key (routes/partner.js), where Offhand's own server has already
+ * verified the phone and the user is acting inside their own app. The scope
+ * is decided here, from the client id, and never from anything a client asks
+ * for — an `offhand` grant is write-capable because it was minted behind the
+ * key, not because a request said so.
+ */
+const SCOPE_READ = 'grounders.read';
+const SCOPE_WRITE = 'grounders.write';
+const SCOPE = SCOPE_READ;
+
+/** Clients whose grants carry write. Everything else reads. */
+const WRITE_CLIENTS = new Set(['offhand']);
+
+/**
+ * The scope a client's grant carries, recomputed on every issue and every
+ * refresh. Deliberately not read from the stored row: when write arrived,
+ * every existing Offhand link held a read-only grant, and a user should not
+ * have to disconnect and reconnect to get a capability their app just grew.
+ */
+function scopeFor(clientId) {
+  return WRITE_CLIENTS.has(clientId) ? `${SCOPE_READ} ${SCOPE_WRITE}` : SCOPE_READ;
+}
+
+/** Does this token's scope string carry `wanted`? */
+function hasScope(scope, wanted) {
+  return String(scope || '').split(/\s+/).includes(wanted);
+}
 
 /** The audience claim: an app token can never be replayed at /mcp. */
 const MCP_AUDIENCE = 'grounders-mcp';
@@ -160,7 +194,7 @@ async function redeemCode({ code, clientId, redirectUri, codeVerifier }) {
   return issueTokens({ userId: row.user_id, clientId, scope: row.scope });
 }
 
-async function issueTokens({ userId, clientId, scope = SCOPE }) {
+async function issueTokens({ userId, clientId, scope = scopeFor(clientId) }) {
   const accessToken = jwt.sign(
     { sub: userId, scope, client_id: clientId, aud: MCP_AUDIENCE },
     signingKey(),
@@ -195,7 +229,9 @@ async function refresh({ refreshToken, clientId }) {
   const row = rows[0];
   if (!row) throw Object.assign(new Error('invalid_grant'), { status: 400 });
 
-  return issueTokens({ userId: row.user_id, clientId, scope: row.scope });
+  // scopeFor(), not row.scope: see the note on scopeFor. The stored value is
+  // still written on every issue, so the table records what was handed out.
+  return issueTokens({ userId: row.user_id, clientId });
 }
 
 /** Revoke one refresh token. Idempotent: an unknown or already-revoked token
@@ -218,5 +254,6 @@ function verifyAccessToken(token) {
 module.exports = {
   registerClient, ensureClient, getClient, redirectAllowed, issueCode, redeemCode,
   issueTokens, refresh, revokeRefreshToken, verifyAccessToken, randomToken, sha256,
-  SCOPE, MCP_AUDIENCE,
+  scopeFor, hasScope,
+  SCOPE, SCOPE_READ, SCOPE_WRITE, MCP_AUDIENCE,
 };

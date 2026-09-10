@@ -56,6 +56,9 @@ run('partner', async () => {
       const row = refreshRows.get(params[0]);
       if (!row || row.revoked || row.client_id !== params[1]) return { rows: [] };
       row.revoked = true;
+      // The stored value is deliberately the old read-only one: a link made
+      // before write existed must come back write-capable anyway, because the
+      // scope is recomputed from the client id on every refresh.
       return { rows: [{ user_id: row.user_id, scope: 'grounders.read' }] };
     }
     if (/UPDATE oauth_refresh_tokens SET revoked_at = NOW\(\)\s+WHERE token_hash = \$1 AND client_id = \$2 AND revoked_at IS NULL/.test(text)) {
@@ -109,7 +112,8 @@ run('partner', async () => {
   const ok = await link({ phone: '604 555 0101' });
   check('a verified phone, in any formatting, links: 200 with access + refresh tokens for client offhand',
     ok.status === 200 && ok.json.token_type === 'Bearer' && typeof ok.json.access_token === 'string'
-      && typeof ok.json.refresh_token === 'string' && ok.json.client_id === 'offhand' && ok.json.scope === 'grounders.read',
+      && typeof ok.json.refresh_token === 'string' && ok.json.client_id === 'offhand'
+      && ok.json.scope === 'grounders.read grounders.write',
     ok.json);
   check('the response carries the display name and nothing else about the user',
     ok.json.user && ok.json.user.display_name === 'Sam' && !('id' in ok.json.user) && !/"(phone|email)"/.test(ok.text),
@@ -126,8 +130,11 @@ run('partner', async () => {
   // ── It is a connector token, not an app session ────────────────────────
   const bearer = { Authorization: `Bearer ${ok.json.access_token}` };
   const list = await h.request('POST', '/mcp', { headers: bearer, body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
-  check('the access token opens /mcp (tools/list lists the seven tools)',
-    list.status === 200 && list.json.result.tools.length === 7, list.status);
+  const partnerTools = list.status === 200 ? list.json.result.tools.map((t) => t.name) : [];
+  check('the access token opens /mcp, and the partner grant sees the send tools the consent page does not',
+    list.status === 200 && partnerTools.includes('radio_messages')
+      && partnerTools.includes('radio_send_message') && partnerTools.includes('radio_send_file'),
+    partnerTools);
   const app = await h.request('GET', '/users/me', { headers: bearer });
   check('the access token is refused by the app\'s own routes (401)', app.status === 401, app.status);
   const claims = jwt.decode(ok.json.access_token);

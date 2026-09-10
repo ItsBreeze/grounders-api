@@ -23,6 +23,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const pool = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const notifications = require('../services/notifications');
+const radioSend = require('../services/radio_send');
 
 router.use(requireAuth);
 
@@ -582,7 +583,6 @@ router.post('/workspaces/:id/upload-url', async (req, res, next) => {
 // Body: { kind, r2_key, size_bytes, mime_type?, filename?, duration_ms? }
 // Called after a successful R2 PUT. Inserts the row and increments storage counter.
 router.post('/workspaces/:id/files', async (req, res, next) => {
-  const client = await pool.connect();
   try {
     const myId = req.user.id;
     const wsId = req.params.id;
@@ -595,73 +595,21 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
     if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return res.status(400).json({ error: 'size_bytes must be a non-negative integer' });
     if (!r2_key.startsWith(`radio/${wsId}/`)) return res.status(400).json({ error: 'r2_key does not match workspace' });
 
-    await client.query('BEGIN');
+    // The row, the storage charge and the push all live in radio_send, which
+    // the MCP connector's send tools call too.
+    const row = await radioSend.recordFile({
+      userId: myId,
+      workspaceId: wsId,
+      kind,
+      r2Key: r2_key,
+      mimeType: mime_type || null,
+      filename: filename || null,
+      sizeBytes,
+      durationMs: parseInt(duration_ms),
+    });
 
-    const fileId = uuid();
-    const { rows: [row] } = await client.query(
-      `INSERT INTO radio_files
-         (id, workspace_id, owner_id, kind, r2_key, mime_type, filename, size_bytes, duration_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
-      [
-        fileId, wsId, myId, kind, r2_key,
-        mime_type || null,
-        filename || null,
-        sizeBytes,
-        Number.isFinite(parseInt(duration_ms)) ? parseInt(duration_ms) : null,
-      ]
-    );
-
-    await client.query(
-      `UPDATE users SET radio_storage_used_bytes = radio_storage_used_bytes + $1 WHERE id = $2`,
-      [sizeBytes, myId]
-    );
-
-    await client.query('COMMIT');
-
-    notifications.fireAndForget((async () => {
-      const { rows: [sender] } = await pool.query(
-        `SELECT display_name FROM users WHERE id = $1`, [myId]
-      );
-      const { rows: [ws] } = await pool.query(
-        `SELECT name FROM radio_workspaces WHERE id = $1`, [wsId]
-      );
-      const { rows: members } = await pool.query(
-        `SELECT user_id FROM radio_workspace_members WHERE workspace_id = $1 AND user_id != $2`,
-        [wsId, myId]
-      );
-      const recipientIds = members.map(m => m.user_id);
-      if (!recipientIds.length) return;
-
-      const senderName = sender?.display_name?.trim() || 'Someone';
-      const wsName = ws?.name?.trim() || 'workspace';
-      const isMemo = kind === 'voice_note';
-      const title = isMemo ? `${senderName} sent a voice memo` : `${senderName} shared a file`;
-      const body  = isMemo ? `In ${wsName}` : `${filename || 'File'} • ${wsName}`;
-
-      return notifications.sendToUsers(recipientIds, {
-        title, body,
-        app: 'radio',
-        data: {
-          type: isMemo ? 'radio_voice_memo' : 'radio_file',
-          workspace_id: wsId,
-          file_id: row.id,
-          from_user_id: myId,
-          sender_name: senderName,
-          workspace_name: wsName,
-          is_group: recipientIds.length > 1,
-          filename: isMemo ? '' : (filename || ''),
-        },
-      });
-    })());
-
-    res.status(201).json({ ...row, url: `${process.env.R2_PUBLIC_URL}/${row.r2_key}` });
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    next(err);
-  } finally {
-    client.release();
-  }
+    res.status(201).json(row);
+  } catch (err) { next(err); }
 });
 
 // POST /radio/workspaces/:id/text { content }
@@ -672,55 +620,14 @@ router.post('/workspaces/:id/text', async (req, res, next) => {
     const wsId = req.params.id;
     if (!(await isMember(wsId, myId))) return res.status(403).json({ error: 'Not a member' });
 
-    const content = (req.body.content || '').toString().trim();
-    if (!content) return res.status(400).json({ error: 'content required' });
-    if (content.length > 5000) return res.status(400).json({ error: 'content too long (max 5000 chars)' });
-
-    const fileId = uuid();
-    const { rows: [row] } = await pool.query(
-      `INSERT INTO radio_files
-         (id, workspace_id, owner_id, kind, text_content, size_bytes)
-       VALUES ($1, $2, $3, 'text', $4, 0)
-       RETURNING *`,
-      [fileId, wsId, myId, content]
-    );
-
-    notifications.fireAndForget((async () => {
-      const { rows: [sender] } = await pool.query(
-        `SELECT display_name FROM users WHERE id = $1`, [myId]
-      );
-      const { rows: [ws] } = await pool.query(
-        `SELECT name FROM radio_workspaces WHERE id = $1`, [wsId]
-      );
-      const { rows: members } = await pool.query(
-        `SELECT user_id FROM radio_workspace_members WHERE workspace_id = $1 AND user_id != $2`,
-        [wsId, myId]
-      );
-      const recipientIds = members.map(m => m.user_id);
-      if (!recipientIds.length) return;
-
-      const senderName = sender?.display_name?.trim() || 'Someone';
-      const wsName = ws?.name?.trim() || 'workspace';
-      const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content;
-      return notifications.sendToUsers(recipientIds, {
-        title: `${senderName} (${wsName})`,
-        body:  preview,
-        app:   'radio',
-        data:  {
-          type: 'radio_text',
-          workspace_id: wsId,
-          file_id: row.id,
-          from_user_id: myId,
-          sender_name: senderName,
-          workspace_name: wsName,
-          is_group: recipientIds.length > 1,
-          preview,
-        },
-      });
-    })());
-
+    const row = await radioSend.sendText({
+      userId: myId, workspaceId: wsId, content: req.body.content,
+    });
     res.status(201).json(row);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /radio/files/:id/copy-to-self — Copy a file into the caller's
