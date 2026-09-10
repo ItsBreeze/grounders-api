@@ -114,7 +114,7 @@ run('mcp', async () => {
       return { rows: pair.includes(ME) && pair.includes(FRIEND) ? [{ 1: 1 }] : [] };
     }
     if (/SELECT 1 FROM blocks/.test(text)) return { rows: [] };
-    if (/FROM reactions r/.test(text)) return { rows: [{ emoji: '🔥', user_id: ME, display_name: 'Me' }] };
+    if (/FROM reactions r/.test(text)) return { rows: [{ post_id: POST, emoji: '🔥', user_id: ME, display_name: 'Me' }] };
     if (/SELECT 1 FROM radio_workspace_members WHERE workspace_id = \$1 AND user_id = \$2/.test(text)) {
       return { rows: params[0] === WS && params[1] === ME ? [{ 1: 1 }] : [] };
     }
@@ -249,8 +249,10 @@ run('mcp', async () => {
   // ── tools/list ─────────────────────────────────────────────────────────
   const list = await h.request('POST', '/mcp', { headers: bearer, body: { jsonrpc: '2.0', id: 4, method: 'tools/list' } });
   const names = list.status === 200 ? list.json.result.tools.map((t) => t.name) : [];
-  check('tools/list returns the seven tools',
+  check('tools/list returns the seven read tools',
     names.join() === 'search,fetch,feed,friends,me,radio_workspaces,radio_messages', names);
+  check('a consent-page grant is read-only: no send tools are offered',
+    !names.some((n) => /^radio_(send|start|add|rename|mark|delete)/.test(n)), names);
   check('search and fetch exist by exactly those names (ChatGPT connector contract)',
     names.includes('search') && names.includes('fetch'));
 
@@ -264,6 +266,12 @@ run('mcp', async () => {
   check('feed is 200 with posts and a per-person summary',
     fd.status === 200 && !fd.json.result.isError && payload(fd).count === 1 && payload(fd).by_person[0].name === 'Sam',
     fd.json);
+  // The whole reason the app can render a photo with "Ben and Dana liked this"
+  // under it without fetching every post one at a time.
+  check('feed posts carry who reacted, resolved in one query for the page',
+    payload(fd).posts[0].reactions?.[0]?.by === 'Me'
+      && h.queries.filter((q) => /FROM reactions r/.test(q.text)).length === 1,
+    payload(fd).posts[0].reactions);
   check('feed SQL excludes archived posts', !!feedSql && /p\.archived_at IS NULL/.test(feedSql.text));
   check('feed SQL excludes accounts pending deletion', !!feedSql && /u\.deletion_pending_at IS NULL/.test(feedSql.text));
   check('feed SQL excludes blocks in either direction', !!feedSql && /blocker_id = \$1 AND b\.blocked_id = p\.user_id/.test(feedSql.text) && /blocked_id = \$1 AND b\.blocker_id = p\.user_id/.test(feedSql.text));
@@ -300,13 +308,40 @@ run('mcp', async () => {
       blocks.length === 2 && blocks[1].type === 'image' && blocks[1].mimeType === 'image/jpeg' && blocks[1].data === Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]).toString('base64'),
       blocks.map((b) => b.type));
     check('the image came from the thumbnail URL by default', fetched[fetched.length - 1] === POST_ROW.media_thumb_url, fetched);
-    check('fetch post includes reactions and the caption', payload(fp).caption === 'Sunset at Kits' && payload(fp).reactions.length === 1, payload(fp));
+    check('fetch post includes the caption, and who reacted by name rather than a bare count',
+    payload(fp).caption === 'Sunset at Kits' && payload(fp).reactions.length === 1
+      && payload(fp).reactions[0].by === 'Me' && payload(fp).reactions[0].emoji === '🔥',
+    payload(fp));
 
     await call('fetch', { id: `post:${POST}`, image: 'full' });
     check('image:"full" downloads the full media URL', fetched[fetched.length - 1] === POST_ROW.media_url, fetched);
 
     const none = await call('fetch', { id: POST, image: 'none' });
     check('a bare uuid is resolved to its kind; image:"none" attaches nothing', none.json.result.content.length === 1 && payload(none).id === `post:${POST}`);
+
+    // A post made before thumbnails shipped carries a media_thumb_url that
+    // 404s. The Grounders app has always fallen back to the full photo; this
+    // did not, and reported "could not be downloaded" for a picture that was
+    // sitting right there. That was the whole of "the assistant can't see my
+    // photos", so it gets a test.
+    fetched.length = 0;
+    global.fetch = async (url, opts) => {
+      if (typeof url === 'string' && url === POST_ROW.media_thumb_url) {
+        fetched.push(url);
+        return new Response('missing', { status: 404 });
+      }
+      if (typeof url === 'string' && url.startsWith('https://media.test/')) {
+        fetched.push(url);
+        return new Response(Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]), { status: 200, headers: { 'content-type': 'image/jpeg', 'content-length': '6' } });
+      }
+      return realFetch(url, opts);
+    };
+    const stale = await call('fetch', { id: `post:${POST}` });
+    check('a 404 thumbnail falls back to the full photo rather than reporting no image',
+      stale.json.result.content.length === 2 && stale.json.result.content[1].type === 'image'
+        && payload(stale).image.attached === true && payload(stale).image.source === 'full'
+        && fetched[0] === POST_ROW.media_thumb_url && fetched[1] === POST_ROW.media_url,
+      { image: payload(stale).image, fetched });
   } finally {
     global.fetch = realFetch;
   }

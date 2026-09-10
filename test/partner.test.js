@@ -28,6 +28,8 @@ const ME = '11111111-1111-4111-8111-111111111111';
 const CLOSING = '99999999-9999-4999-8999-999999999999';
 const PHONE = '+16045550101';
 const CLOSING_PHONE = '+16045550199';
+// One person's number written the other way: a second row, same digits.
+const TWIN = '22222222-2222-4222-8222-222222222222';
 
 const sha256 = (v) => crypto.createHash('sha256').update(v).digest('base64url');
 
@@ -37,16 +39,34 @@ run('partner', async () => {
   // token_hash -> { client_id, user_id, revoked }
   const refreshRows = new Map();
   const users = {
-    [ME]: { id: ME, display_name: 'Sam', deletion_pending_at: null, phone: PHONE },
+    [ME]: { id: ME, display_name: 'Sam', deletion_pending_at: null, phone: PHONE, last_post_at: new Date() },
     [CLOSING]: { id: CLOSING, display_name: 'Gone', deletion_pending_at: new Date(), phone: CLOSING_PHONE },
+    // The same number written two ways is two rows: `phone` is UNIQUE on the
+    // text, and the match is on digits. The empty one must never be the one
+    // that gets linked — connecting to it looks like success and then every
+    // read comes back empty.
+    [TWIN]: { id: TWIN, display_name: '', deletion_pending_at: null, phone: PHONE.replace(/\D/g, '') },
   };
 
   h.setQueryHandler((text, params) => {
     if (/INSERT INTO oauth_clients/.test(text)) return { rows: [], rowCount: 1 };
-    if (/SELECT id, display_name, deletion_pending_at FROM users\s+WHERE regexp_replace/.test(text)) {
+    // Matched on shape, not on the exact SELECT list: the route orders the
+    // matches now, and a stub that pins the column list turns a reordering
+    // into a silent "no account".
+    if (/FROM users/.test(text) && /regexp_replace/.test(text)) {
       const digits = String(params[0]).replace(/\D/g, '');
-      const u = Object.values(users).find((x) => x.phone.replace(/\D/g, '') === digits);
-      return { rows: u ? [{ id: u.id, display_name: u.display_name, deletion_pending_at: u.deletion_pending_at }] : [] };
+      const matches = Object.values(users)
+        .filter((x) => x.phone.replace(/\D/g, '') === digits)
+        // The route asks for the account in use first; the stub answers in
+        // that order so the ordering is what the test is really checking.
+        .sort((a, b) => (b.last_post_at ? 1 : 0) - (a.last_post_at ? 1 : 0));
+      return {
+        rows: matches.map((u) => ({
+          id: u.id,
+          display_name: u.display_name,
+          deletion_pending_at: u.deletion_pending_at,
+        })),
+      };
     }
     if (/INSERT INTO oauth_refresh_tokens/.test(text)) {
       refreshRows.set(params[0], { client_id: params[1], user_id: params[2], revoked: false });
@@ -56,6 +76,9 @@ run('partner', async () => {
       const row = refreshRows.get(params[0]);
       if (!row || row.revoked || row.client_id !== params[1]) return { rows: [] };
       row.revoked = true;
+      // The stored value is deliberately the old read-only one: a link made
+      // before write existed must come back write-capable anyway, because the
+      // scope is recomputed from the client id on every refresh.
       return { rows: [{ user_id: row.user_id, scope: 'grounders.read' }] };
     }
     if (/UPDATE oauth_refresh_tokens SET revoked_at = NOW\(\)\s+WHERE token_hash = \$1 AND client_id = \$2 AND revoked_at IS NULL/.test(text)) {
@@ -109,7 +132,8 @@ run('partner', async () => {
   const ok = await link({ phone: '604 555 0101' });
   check('a verified phone, in any formatting, links: 200 with access + refresh tokens for client offhand',
     ok.status === 200 && ok.json.token_type === 'Bearer' && typeof ok.json.access_token === 'string'
-      && typeof ok.json.refresh_token === 'string' && ok.json.client_id === 'offhand' && ok.json.scope === 'grounders.read',
+      && typeof ok.json.refresh_token === 'string' && ok.json.client_id === 'offhand'
+      && ok.json.scope === 'grounders.read grounders.write',
     ok.json);
   check('the response carries the display name and nothing else about the user',
     ok.json.user && ok.json.user.display_name === 'Sam' && !('id' in ok.json.user) && !/"(phone|email)"/.test(ok.text),
@@ -126,8 +150,11 @@ run('partner', async () => {
   // ── It is a connector token, not an app session ────────────────────────
   const bearer = { Authorization: `Bearer ${ok.json.access_token}` };
   const list = await h.request('POST', '/mcp', { headers: bearer, body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } });
-  check('the access token opens /mcp (tools/list lists the seven tools)',
-    list.status === 200 && list.json.result.tools.length === 7, list.status);
+  const partnerTools = list.status === 200 ? list.json.result.tools.map((t) => t.name) : [];
+  check('the access token opens /mcp, and the partner grant sees the send tools the consent page does not',
+    list.status === 200 && partnerTools.includes('radio_messages')
+      && partnerTools.includes('radio_send_message') && partnerTools.includes('radio_send_file'),
+    partnerTools);
   const app = await h.request('GET', '/users/me', { headers: bearer });
   check('the access token is refused by the app\'s own routes (401)', app.status === 401, app.status);
   const claims = jwt.decode(ok.json.access_token);

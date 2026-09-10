@@ -35,7 +35,7 @@ Never:          voice notes, phone numbers, anything written
 | "Find the PDF Jordan shared" | `search` then `fetch message:…` |
 | "How much have I posted?" | `me` |
 
-Seven tools, all read-only:
+Seven read tools, offered to every client:
 
 | Tool | Does |
 |---|---|
@@ -50,6 +50,45 @@ Seven tools, all read-only:
 `search` and `fetch` are named and shaped to match ChatGPT's knowledge-base
 connector contract, which requires exactly those two. Claude and Gemini do
 not care, so matching costs nothing and buys a client.
+
+### Sending, for a client that may
+
+Seven more tools appear only for a grant carrying `grounders.write`, which
+today is Offhand's partner link and nothing else. A grant from the consent
+page — Claude, ChatGPT, Gemini — never sees them in `tools/list`, and naming
+one anyway is refused before any query runs. Nobody's Radio grows a send
+button because they added a connector.
+
+| Tool | Does |
+|---|---|
+| `radio_send_message` | A text message into a conversation, addressed by `to` (a friend's name → the direct thread) or `workspace_id` |
+| `radio_send_file` | Fetches an https URL — a Grounders photo, a file from another thread, a link — and sends it as a file, with an optional message alongside. 20 MB |
+| `radio_start_conversation` | Opens (or finds) the direct thread with a friend, or creates a named group |
+| `radio_add_member` | Adds a friend to a group you are in |
+| `radio_rename_conversation` | Renames a group |
+| `radio_mark_read` | Clears the unread count, as opening it would |
+| `radio_delete_message` | Deletes one of your own messages — the way to take something back |
+
+Radio only. A Grounders post needs a photo taken at a place at a time and
+belongs to the camera in the user's hand, so Grounders stays read-only through
+the connector however the grant is scoped.
+
+The bounds are the app's bounds, enforced per call: you can only write into a
+conversation you are a member of, only add someone you are already friends
+with, and only delete a message you sent. Every message goes through
+`src/services/radio_send.js`, which is also what `POST /radio/workspaces/:id/text`
+and `/files` call — so a message sent by an assistant is the same row, with the
+same push notification, as one sent from the app.
+
+`radio_send_file` will only fetch public https, and resolves every redirect hop
+against the private address ranges before requesting it: the URL comes from a
+model, which got it from a tool result or from something a person typed, and is
+not trusted to point outward.
+
+The scope is decided from the client id in `src/services/mcp_oauth.js`, never
+from anything a client asks for, and it is recomputed on every refresh — so a
+link made before sending existed becomes write-capable without the user
+reconnecting.
 
 ### Photos
 
@@ -157,7 +196,7 @@ and receives what the consent page would have issued.
 
 | Path | Role |
 |---|---|
-| `POST /partner/offhand/link` | `{ phone }` → the connector's tokens for that account (client `offhand`, scope `grounders.read`) plus the display name. 404 `no_account`, 403 `account_closing`, 400 `invalid_phone` |
+| `POST /partner/offhand/link` | `{ phone }` → the connector's tokens for that account (client `offhand`, scope `grounders.read grounders.write`) plus the display name. 404 `no_account`, 403 `account_closing`, 400 `invalid_phone` |
 | `POST /partner/offhand/unlink` | `{ refresh_token }` → 204, the grant revoked. Idempotent |
 
 Both take `Authorization: Bearer <OFFHAND_PARTNER_KEY>`, compared in constant
@@ -207,9 +246,11 @@ tables of the retired Gmail connector, which are left untouched.
 | `src/routes/mcp_oauth.js` | Discovery, registration, consent pages, token endpoint |
 | `src/services/mcp_oauth.js` | Clients, codes, tokens, the derived signing key |
 | `src/routes/partner.js` | The Offhand partner link: a verified phone → connector tokens |
+| `src/services/radio_send.js` | Sending on Radio — the row, the storage charge, the push — shared by the routes and the tools |
 | `src/utils/phone.js` | E.164 coercion shared by the consent page and the partner link |
-| `test/mcp.test.js` | 55 checks — `npm run test:mcp` |
+| `test/mcp.test.js` | 56 checks — `npm run test:mcp` |
 | `test/partner.test.js` | 25 checks — `npm run test:partner` |
+| `test/radio_send.test.js` | 16 checks on the write scope and its bounds — `npm run test:radio_send` |
 
 ---
 

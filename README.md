@@ -148,6 +148,46 @@ protected_zones     — lat/lng only, 500m radius default
 
 ---
 
+## Operations
+
+### Wiping every post — `src/scripts/wipe-posts.js`
+
+Deletes **all** posts in the database, every user's included — written for
+clearing out a public test, not for routine use. It removes what a single
+`DELETE /posts/:id` removes: the posts (archived ones too), the reactions on
+them, the reports about them, and each author's `total_distance_m` /
+`last_post_lat` / `last_post_lng` / `last_post_at`, which collapse to zero
+once no post is left. All of it in one transaction.
+
+It does *not* delete the media behind `media_url` / `media_thumb_url` from
+R2 — neither does the single-post delete, so those objects are orphaned
+either way.
+
+```bash
+node src/scripts/wipe-posts.js             # dry run — counts per user, no writes
+node src/scripts/wipe-posts.js --confirm   # deletes
+```
+
+Without `--confirm` it opens no transaction and issues no write; it prints
+what it would delete and stops. With an unset `DATABASE_URL` it exits 1
+rather than falling through to a local Postgres.
+
+Against production, run it through the Railway CLI so it picks up the
+deployed service's `DATABASE_URL` — there is no `.env` in the repository:
+
+```bash
+railway link                                       # once, pick the API service
+railway run node src/scripts/wipe-posts.js         # dry run against production
+railway run node src/scripts/wipe-posts.js --confirm
+```
+
+Read the dry-run summary before adding `--confirm`. The first line of output
+names the host and database it is pointed at; check it is the one you meant.
+Deliberately not an `npm run` script — this is a one-off, and typing the path
+is part of the safety.
+
+---
+
 ## Production checklist
 
 - [ ] Set `DEV_MODE=false` and wire up Twilio (SMS) + SendGrid (email)
