@@ -118,22 +118,45 @@ router.put('/dial', async (req, res, next) => {
 });
 
 
-// ─── Search (contacts + workspaces + files) ─────────────────────────────────
+// ─── Search (contacts + workspaces + files + messages) ──────────────────────
+
+/**
+ * A short excerpt of a message body centred on the first match, so a search
+ * hit can show *why* it matched without shipping the whole message.
+ * Whitespace is collapsed; ellipses mark either end that was cut.
+ */
+function bodySnippet(body, needle, width = 160) {
+  const text = (body || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= width) return text;
+  const at = text.toLowerCase().indexOf(needle.toLowerCase());
+  if (at < 0) return text.slice(0, width).trimEnd() + '…';
+  const start = Math.max(0, at - 40);
+  const end = Math.min(text.length, start + width);
+  return (start > 0 ? '…' : '') + text.slice(start, end).trim() + (end < text.length ? '…' : '');
+}
 
 // GET /radio/search?q=...&limit=10
-// Returns three grouped lists, scoped to:
+// Returns four grouped lists, scoped to:
 //   - friends (contacts): match display_name
-//   - workspaces I'm a member of: match name
+//   - workspaces I'm a member of: match the name, or, when a group has
+//     no name of its own, any other member's display name — the client
+//     labels such a group with those names joined, so that label is what
+//     a search has to match. `display_name` on each row is that label.
 //   - files inside those workspaces: match filename
+//   - messages inside those workspaces: match the text body
+// `messages` was added last; the other three keys are unchanged, so a client
+// that predates it simply ignores the extra key.
 router.get('/search', async (req, res, next) => {
   try {
     const myId = req.user.id;
     const q = (req.query.q || '').toString().trim();
-    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
-    if (!q) return res.json({ contacts: [], workspaces: [], files: [] });
+    // Floored at 1 as well as capped: ?limit=-5 would otherwise reach
+    // Postgres as `LIMIT -5`, which is an error, not an empty result.
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit) || 10, 50));
+    if (!q) return res.json({ contacts: [], workspaces: [], files: [], messages: [] });
     const like = `%${q.replace(/[%_]/g, m => '\\' + m)}%`;
 
-    const [contactsR, workspacesR, filesR] = await Promise.all([
+    const [contactsR, workspacesR, filesR, messagesR] = await Promise.all([
       pool.query(
         `SELECT u.id, u.display_name
            FROM friendships f
@@ -147,11 +170,30 @@ router.get('/search', async (req, res, next) => {
       ),
       pool.query(
         `SELECT w.id, w.name, w.owner_id,
-                (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count
+                (SELECT COUNT(*)::int FROM radio_workspace_members m WHERE m.workspace_id = w.id) AS member_count,
+                COALESCE(NULLIF(w.name, ''), (
+                  SELECT string_agg(uu.display_name, ', ' ORDER BY uu.display_name)
+                    FROM radio_workspace_members mm
+                    JOIN users uu ON uu.id = mm.user_id
+                   WHERE mm.workspace_id = w.id AND mm.user_id <> $1
+                ), '') AS display_name
            FROM radio_workspaces w
            JOIN radio_workspace_members me ON me.workspace_id = w.id
           WHERE me.user_id = $1
-            AND w.name ILIKE $2 ESCAPE '\\'
+            AND (
+              w.name ILIKE $2 ESCAPE '\\'
+              OR (
+                COALESCE(w.name, '') = ''
+                AND EXISTS (
+                  SELECT 1
+                    FROM radio_workspace_members mm
+                    JOIN users uu ON uu.id = mm.user_id
+                   WHERE mm.workspace_id = w.id
+                     AND mm.user_id <> $1
+                     AND uu.display_name ILIKE $2 ESCAPE '\\'
+                )
+              )
+            )
           ORDER BY w.created_at DESC
           LIMIT $3`,
         [myId, like, limit]
@@ -170,6 +212,33 @@ router.get('/search', async (req, res, next) => {
           LIMIT $3`,
         [myId, like, limit]
       ),
+      // Typed messages live in radio_files as kind = 'text' with the body in
+      // text_content. There is no text index on that column, so this is a
+      // case-insensitive ILIKE scan over the caller's own workspaces —
+      // acceptable at this scale, and the same thing the MCP connector does
+      // (src/mcp/tools.js). Restricting to kind = 'text' keeps these rows
+      // from also appearing in `files` above.
+      pool.query(
+        `SELECT f.id, f.workspace_id, f.owner_id, f.kind, f.text_content, f.created_at,
+                u.display_name AS owner_name,
+                w.name AS workspace_name,
+                COALESCE(NULLIF(w.name, ''), (
+                  SELECT string_agg(uu.display_name, ', ' ORDER BY uu.display_name)
+                    FROM radio_workspace_members mm
+                    JOIN users uu ON uu.id = mm.user_id
+                   WHERE mm.workspace_id = w.id AND mm.user_id <> $1
+                ), '') AS workspace_display_name
+           FROM radio_files f
+           JOIN radio_workspaces w ON w.id = f.workspace_id
+           JOIN radio_workspace_members me ON me.workspace_id = f.workspace_id
+           JOIN users u ON u.id = f.owner_id
+          WHERE me.user_id = $1
+            AND f.kind = 'text'
+            AND f.text_content ILIKE $2 ESCAPE '\\'
+          ORDER BY f.created_at DESC
+          LIMIT $3`,
+        [myId, like, limit]
+      ),
     ]);
 
     const base = process.env.R2_PUBLIC_URL;
@@ -177,6 +246,17 @@ router.get('/search', async (req, res, next) => {
       contacts: contactsR.rows,
       workspaces: workspacesR.rows,
       files: filesR.rows.map(r => ({ ...r, url: `${base}/${r.r2_key}` })),
+      messages: messagesR.rows.map(r => ({
+        id: r.id,
+        workspace_id: r.workspace_id,
+        workspace_name: r.workspace_name,
+        workspace_display_name: r.workspace_display_name,
+        owner_id: r.owner_id,
+        owner_name: r.owner_name,
+        kind: r.kind,
+        snippet: bodySnippet(r.text_content, q),
+        created_at: r.created_at,
+      })),
     });
   } catch (err) { next(err); }
 });
@@ -241,8 +321,16 @@ router.post('/workspaces/:id/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /radio/workspaces { name?, member_ids?: [uuid] }
+// POST /radio/workspaces { name?, member_ids?: [uuid], allow_duplicate?: bool }
 // Creator is automatically a member. Each invited member must be a friend.
+//
+// By default this is find-or-create: if the caller is already in a workspace
+// whose member set is exactly {caller} ∪ member_ids, that workspace is
+// returned instead of a second identical one being made (the same courtesy
+// GET /radio/workspaces/dm does for 1:1s, generalised to any size). The
+// response then carries `existing: true` and HTTP 200 rather than 201.
+// Pass `allow_duplicate: true` to skip the lookup and always insert — that is
+// the dial's deliberate "new workspace with these people" action.
 router.post('/workspaces', async (req, res, next) => {
   const client = await pool.connect();
   try {
@@ -252,11 +340,47 @@ router.post('/workspaces', async (req, res, next) => {
     // Accept hex like "#1E88E5" — case-insensitive, no surrounding whitespace.
     const color = /^#[0-9a-fA-F]{6}$/.test(rawColor) ? rawColor.toUpperCase() : null;
     const memberIds = Array.isArray(req.body.member_ids) ? req.body.member_ids : [];
+    const allowDuplicate = req.body.allow_duplicate === true;
 
     for (const mid of memberIds) {
       if (mid === myId) continue;
       if (!(await areFriends(myId, mid))) {
         return res.status(403).json({ error: `Not friends with ${mid}` });
+      }
+    }
+
+    const allMembers = Array.from(new Set([myId, ...memberIds]));
+
+    if (!allowDuplicate) {
+      // Exact set equality: same member count, and nobody in the workspace
+      // who is outside the requested set. Newest wins if there are already
+      // several (created before this reuse existed, or via allow_duplicate).
+      const { rows: [dupe] } = await client.query(
+        `SELECT w.id, w.owner_id, w.name, w.color, w.created_at,
+                ARRAY(SELECT m2.user_id FROM radio_workspace_members m2
+                       WHERE m2.workspace_id = w.id) AS member_ids
+           FROM radio_workspaces w
+           JOIN radio_workspace_members me ON me.workspace_id = w.id
+          WHERE me.user_id = $1
+            AND (SELECT COUNT(*) FROM radio_workspace_members m
+                  WHERE m.workspace_id = w.id) = $2
+            AND NOT EXISTS (
+              SELECT 1 FROM radio_workspace_members m
+               WHERE m.workspace_id = w.id AND m.user_id <> ALL($3::uuid[])
+            )
+          ORDER BY w.created_at DESC
+          LIMIT 1`,
+        [myId, allMembers.length, allMembers]
+      );
+      if (dupe) {
+        return res.json({
+          id: dupe.id,
+          owner_id: dupe.owner_id,
+          name: dupe.name,
+          color: dupe.color,
+          member_ids: dupe.member_ids,
+          existing: true,
+        });
       }
     }
 
@@ -267,7 +391,6 @@ router.post('/workspaces', async (req, res, next) => {
       [wsId, myId, name, color]
     );
 
-    const allMembers = Array.from(new Set([myId, ...memberIds]));
     for (const mid of allMembers) {
       await client.query(
         `INSERT INTO radio_workspace_members (workspace_id, user_id, added_by)
@@ -295,7 +418,7 @@ router.post('/workspaces', async (req, res, next) => {
       })());
     }
 
-    res.status(201).json({ id: wsId, owner_id: myId, name, color, member_ids: allMembers });
+    res.status(201).json({ id: wsId, owner_id: myId, name, color, member_ids: allMembers, existing: false });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     next(err);
