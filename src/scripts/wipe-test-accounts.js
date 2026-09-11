@@ -141,9 +141,27 @@ function neverDelete(alias = 'u') {
     //    anything, so deleting the rows would orphan objects unrecoverably.
     `NOT EXISTS (SELECT 1 FROM posts p WHERE p.user_id = ${alias}.id)`,
     // 3. Anyone with a friend, in either direction. friendships cascades, so
-    //    deleting here silently edits a real person's friend list.
-    `NOT EXISTS (SELECT 1 FROM friendships f
-                  WHERE f.user_id_a = ${alias}.id OR f.user_id_b = ${alias}.id)`,
+    //    deleting here silently edits a real person's friend list. This is the
+    //    ONE clause --allow-friend-edits can lift, and it is liftable because
+    //    the damage is visible and small: a row goes off a friend list, and
+    //    the dry run names whose before anything is confirmed. Nothing else
+    //    here can be turned off by any flag.
+    ...(ALLOW_FRIEND_EDITS ? [] : [
+      `NOT EXISTS (SELECT 1 FROM friendships f
+                    WHERE f.user_id_a = ${alias}.id OR f.user_id_b = ${alias}.id)`,
+    ]),
+    // 3b. Anyone who has actually signed in. A refresh_tokens row is written
+    //     by storeRefreshToken on every sign-in and every /auth/refresh, so
+    //     its presence is PROOF a person used this account -- unlike its
+    //     absence, which proves nothing (the row expires, and DELETE
+    //     /users/me clears it). Proof is the direction worth acting on.
+    //
+    //     This is what keeps a real account safe once --allow-friend-edits
+    //     lifts clause 3. Without it, any account whose only tie was a
+    //     friendship became reachable by --ids, and a real one did: the
+    //     dry run that proved this flag out could select a signed-in friend
+    //     of the operator by id. Unconditional, and no flag lifts it.
+    `NOT EXISTS (SELECT 1 FROM refresh_tokens rt WHERE rt.user_id = ${alias}.id)`,
     // 4. Anyone holding a Radio message — voice notes, files and typed
     //    messages all live in radio_files.
     `NOT EXISTS (SELECT 1 FROM radio_files rf WHERE rf.owner_id = ${alias}.id)`,
@@ -164,6 +182,13 @@ function neverDelete(alias = 'u') {
 const ARGV = process.argv.slice(2);
 const CONFIRM = ARGV.includes('--confirm');
 const HARD = ARGV.includes('--hard');
+
+// Opens ONE hole in neverDelete(), and only clause 3. It permits nothing by
+// itself: without a rule flag the selection is still empty. Named for what it
+// costs rather than what it enables, because that is the thing the operator
+// needs to weigh -- deleting a friend edits somebody else's friend list, and
+// that somebody is usually the person running this.
+const ALLOW_FRIEND_EDITS = ARGV.includes('--allow-friend-edits');
 
 function flagValue(name) {
   const hit = ARGV.find(a => a.startsWith(`--${name}=`));
@@ -250,6 +275,17 @@ const RULES = [
     sql: () => `NOT EXISTS (SELECT 1 FROM refresh_tokens rt WHERE rt.user_id = u.id)`,
   },
   {
+    flag: '--seeded',
+    help: 'fixture rows whose uuid begins aaaaaaaa- or bbbbbbbb-',
+    // Matches the SHAPE OF THE ID, not anything about the person. The seed
+    // data was written with hand-typed uuids; uuid_generate_v4() fills those
+    // first eight hex digits at random, so a real account reaching this
+    // pattern is a 1-in-4-billion accident. The trailing dash is load-bearing:
+    // without it 'aaaaaaaa%' would also be a prefix test that a real id
+    // beginning with those characters could satisfy.
+    sql: () => `(u.id::text LIKE 'aaaaaaaa-%' OR u.id::text LIKE 'bbbbbbbb-%')`,
+  },
+  {
     flag: '--reserved-phone',
     help: 'phone in the NANP fiction range 555-0100..555-0199',
     // 1 + area code + 555 + 01 + two digits. Deliberately not "any 555
@@ -289,7 +325,7 @@ const VALUE_RULES = [
   },
 ];
 
-const KNOWN_SWITCHES = ['--confirm', '--hard', ...RULES.map(r => r.flag)];
+const KNOWN_SWITCHES = ['--confirm', '--hard', '--allow-friend-edits', ...RULES.map(r => r.flag)];
 const KNOWN_VALUES = ['--limit', ...VALUE_RULES.map(r => r.flag)];
 
 // Reject anything unrecognised rather than ignoring it. A mistyped --limit=5
@@ -491,6 +527,43 @@ function formatCounts(row) {
   return DEPENDENTS.map(([key, label]) => `${label} ${row[key]}`).join(', ');
 }
 
+/**
+ * Whose friend lists this selection would edit.
+ *
+ * Only meaningful with --allow-friend-edits, which is the flag that let these
+ * rows be selected at all. A friendship BETWEEN two candidates is left out --
+ * both ends are going, so nobody outside the set notices. What is left is the
+ * people who stay behind and lose a friend, which is the cost the operator is
+ * being asked to accept.
+ */
+async function friendImpact(client, ids) {
+  if (!ALLOW_FRIEND_EDITS || ids.length === 0) return [];
+  const { rows } = await client.query(
+    `SELECT o.id, o.display_name, o.phone, COUNT(*)::int AS lost
+       FROM friendships f
+       JOIN users o ON o.id = CASE WHEN f.user_id_a = ANY($1::uuid[])
+                                   THEN f.user_id_b ELSE f.user_id_a END
+      WHERE (f.user_id_a = ANY($1::uuid[]) OR f.user_id_b = ANY($1::uuid[]))
+        AND NOT (o.id = ANY($1::uuid[]))
+      GROUP BY o.id, o.display_name, o.phone
+      ORDER BY lost DESC, o.display_name`,
+    [ids]
+  );
+  return rows;
+}
+
+function printFriendImpact(impact) {
+  if (impact.length === 0) return;
+  console.log('');
+  console.log('!! --allow-friend-edits is on. These people stay, and lose a friend:');
+  for (const r of impact) {
+    const name = (r.display_name || '').trim() || '(no name)';
+    console.log(`!!   ${name}   ${r.phone || '(no phone)'}   loses ${r.lost}`);
+  }
+  console.log('!! Their friendship rows go with the accounts below. Nothing else of');
+  console.log('!! theirs is touched.');
+}
+
 function printSummary(rows, { limit, named }) {
   console.log(`Rules applied:             ${named.join(' ')}`);
   console.log(`Limit:                     ${limit === null ? 'none (every match)' : limit}`);
@@ -558,6 +631,7 @@ async function wipeTestAccounts() {
   try {
     const rows = await candidates(client, selection, limit);
     printSummary(rows, { limit, named: selection.named });
+    printFriendImpact(await friendImpact(client, rows.map(r => r.id)));
 
     // An id the operator pasted that did not come back was dropped by the
     // exclusion, cut by --limit, filtered out by another rule, or does not
