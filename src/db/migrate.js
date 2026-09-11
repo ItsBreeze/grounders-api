@@ -42,6 +42,14 @@ CREATE INDEX IF NOT EXISTS idx_users_deletion_pending
   ON users (deletion_pending_at)
   WHERE deletion_pending_at IS NOT NULL;
 
+-- The account owner's veto over the Offhand partner link (routes/partner.js),
+-- which issues a connector grant on a partner's word that it verified the
+-- phone. TRUE by default, including for every row that predates this column:
+-- an account that has never thought about it still links. Flipped false, no
+-- NEW link is issued for that account; a grant that already exists is left
+-- alone (see the comment in routes/partner.js for why).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS partner_link_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
 
 -- ─── OTPs ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS otps (

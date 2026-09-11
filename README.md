@@ -44,8 +44,8 @@ Response: `{ "token": "eyJ...", "user": {...}, "is_new": true }`
 ### Users
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/users/me` | My profile with post_count, friend_count, total_distance_m |
-| PATCH | `/users/me` | Update display_name |
+| GET | `/users/me` | My profile with post_count, friend_count, total_distance_m, partner_link_enabled |
+| PATCH | `/users/me` | Update display_name and/or partner_link_enabled (whether Offhand may link this account — see [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) |
 | GET | `/users/:id` | Another user's profile (friends or friend-of-friend only) |
 
 ---

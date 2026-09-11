@@ -41,21 +41,45 @@ router.get('/me', async (req, res, next) => {
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
-    res.json(sanitizeUser(rows[0]));
+    res.json(sanitizeSelf(rows[0]));
   } catch (err) { next(err); }
 });
 
+// PATCH /users/me — display_name and the partner-link switch. Both fields are
+// optional on their own and what is absent is left as it was; a body with
+// neither is the 400 it always was.
 router.patch('/me', async (req, res, next) => {
   try {
-    const { display_name } = req.body;
-    if (!display_name?.trim()) {
+    const { display_name, partner_link_enabled } = req.body || {};
+    if (display_name === undefined && partner_link_enabled === undefined) {
       return res.status(400).json({ error: 'display_name is required' });
     }
+
+    const sets = [];
+    const params = [];
+    if (display_name !== undefined) {
+      if (!display_name?.trim()) {
+        return res.status(400).json({ error: 'display_name is required' });
+      }
+      params.push(display_name.trim());
+      sets.push(`display_name = $${params.length}`);
+    }
+    if (partner_link_enabled !== undefined) {
+      // A string "false" arriving from a sloppy client must not read as
+      // true and quietly leave the switch on.
+      if (typeof partner_link_enabled !== 'boolean') {
+        return res.status(400).json({ error: 'partner_link_enabled must be a boolean' });
+      }
+      params.push(partner_link_enabled);
+      sets.push(`partner_link_enabled = $${params.length}`);
+    }
+
+    params.push(req.user.id);
     const { rows } = await pool.query(
-      `UPDATE users SET display_name = $1 WHERE id = $2 RETURNING *`,
-      [display_name.trim(), req.user.id]
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
     );
-    res.json(sanitizeUser(rows[0]));
+    res.json(sanitizeSelf(rows[0]));
   } catch (err) { next(err); }
 });
 
@@ -184,6 +208,19 @@ function sanitizeUser(u) {
     post_count: parseInt(u.post_count) || 0,
     friend_count: parseInt(u.friend_count) || 0,
     created_at: u.created_at,
+  };
+}
+
+// The owner's own view of their row: the public shape plus the settings only
+// they may see or change. Deliberately not folded into sanitizeUser, so
+// GET /users/:id does not report whether somebody else accepts partner links.
+function sanitizeSelf(u) {
+  return {
+    ...sanitizeUser(u),
+    // NOT NULL DEFAULT TRUE in the schema, so this is always a boolean from a
+    // migrated database; the coercion only covers a row read by a server
+    // whose migration has not run yet, where absent means "not refused".
+    partner_link_enabled: u.partner_link_enabled !== false,
   };
 }
 

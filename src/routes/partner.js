@@ -14,7 +14,9 @@
  *
  * The one trust decision — "Offhand verified this phone" — lives in this file
  * and nowhere else. The key is compared in constant time, and a server
- * without one refuses outright rather than accepting anything.
+ * without one refuses outright rather than accepting anything. The account
+ * holder can refuse that trust for their own account: users.partner_link_enabled,
+ * checked below before any token is issued.
  *
  * Linking never creates an account, and an account pending deletion is
  * refused, for the same reasons the consent page has (MCP-CONNECTOR.md).
@@ -70,7 +72,7 @@ router.post('/partner/offhand/link', requirePartnerKey, async (req, res, next) =
     // the account that is actually in use, and say so when there was a
     // choice to make.
     const { rows } = await pool.query(
-      `SELECT u.id, u.display_name, u.deletion_pending_at
+      `SELECT u.id, u.display_name, u.deletion_pending_at, u.partner_link_enabled
          FROM users u
         WHERE regexp_replace(u.phone, '\\D', '', 'g') = regexp_replace($1, '\\D', '', 'g')
         ORDER BY u.last_post_at DESC NULLS LAST,
@@ -80,6 +82,47 @@ router.post('/partner/offhand/link', requirePartnerKey, async (req, res, next) =
     );
     const user = rows[0];
     if (!user) return res.status(404).json({ error: 'no_account' });
+
+    // The account holder's own veto, checked here — the first thing this
+    // route does once it knows whose account this is, and above every later
+    // branch — so that no path from a matched account to an issued token can
+    // get around it.
+    //
+    // WHY it exists: every other way to a connector grant costs the account
+    // holder a consent page they had to look at and approve. This one costs
+    // them nothing they can see. The endpoint issues the grant on Offhand's
+    // word that it texted a code to this number, and there is no way from
+    // here to check that word — the trust is the whole design (above), so the
+    // owner of the account needs some way to say "no, not even on Offhand's
+    // say-so". Until recently they had no way to say it after the fact
+    // either: a grant made this way was invisible from this side (nothing in
+    // Grounders or ItsRadio listed it) and unrevocable from this side (only
+    // Offhand's own Disconnect, calling /partner/offhand/unlink, could take
+    // it back). This switch is the answer to both, which is why it is a
+    // per-account column and not a server-wide setting.
+    //
+    // What it deliberately does NOT do: revoke a grant that already exists.
+    // A refresh token already issued keeps rotating at /oauth/token, which
+    // never reads this column. Turning the switch off stops the NEXT link;
+    // it does not cut a live one. To cut a live one: Disconnect in Offhand
+    // (POST /partner/offhand/unlink), or delete the Grounders account, whose
+    // cascade takes oauth_refresh_tokens with it. The reason is that
+    // flipping a settings toggle should not silently break the assistant
+    // someone is still using — a revocation should be an act, not a
+    // side effect.
+    //
+    // Read across EVERY row that holds these digits, not only the one this
+    // route is about to link. One person can hold two rows (above) and is
+    // signed in to just one of them, so the refusal they recorded there has
+    // to count even when the row the ordering picks is the other one.
+    //
+    // `=== false` rather than `!r.partner_link_enabled`: on a server whose
+    // migration has not run yet the column is absent, and undefined there
+    // means "nobody has refused", not "everybody has".
+    if (rows.some((r) => r.partner_link_enabled === false)) {
+      return res.status(403).json({ error: 'link_disabled' });
+    }
+
     if (rows.length > 1) {
       // Worth knowing about: two rows hold one person's number in two
       // formats, so something upstream is not normalising on write.

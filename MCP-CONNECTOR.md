@@ -196,7 +196,7 @@ and receives what the consent page would have issued.
 
 | Path | Role |
 |---|---|
-| `POST /partner/offhand/link` | `{ phone }` → the connector's tokens for that account (client `offhand`, scope `grounders.read grounders.write`) plus the display name. 404 `no_account`, 403 `account_closing`, 400 `invalid_phone` |
+| `POST /partner/offhand/link` | `{ phone }` → the connector's tokens for that account (client `offhand`, scope `grounders.read grounders.write`) plus the display name. 404 `no_account`, 403 `account_closing`, 403 `link_disabled`, 400 `invalid_phone` |
 | `POST /partner/offhand/unlink` | `{ refresh_token }` → 204, the grant revoked. Idempotent |
 
 Both take `Authorization: Bearer <OFFHAND_PARTNER_KEY>`, compared in constant
@@ -209,7 +209,15 @@ the app's routes, the refresh token is stored hashed and rotates at
 response carries the display name and nothing else about the user. Offhand
 revokes the grant when the user disconnects or deletes their Offhand account.
 
-`test/partner.test.js` asserts all of that — 25 checks, `npm run test:partner`.
+The account holder can refuse the whole arrangement: `users.partner_link_enabled`
+(`GET`/`PATCH /users/me`, and a switch in both apps' settings) is TRUE by
+default, and false makes this endpoint answer 403 `link_disabled` before any
+token is issued. It stops new links only — a grant already issued keeps
+refreshing at `/oauth/token`, which never reads the column. Cutting a live one
+is `POST /partner/offhand/unlink` (Offhand's Disconnect) or deleting the
+Grounders account, whose cascade takes the grant with it.
+
+`test/partner.test.js` asserts all of that — 31 checks, `npm run test:partner`.
 
 ---
 
@@ -248,8 +256,8 @@ tables of the retired Gmail connector, which are left untouched.
 | `src/routes/partner.js` | The Offhand partner link: a verified phone → connector tokens |
 | `src/services/radio_send.js` | Sending on Radio — the row, the storage charge, the push — shared by the routes and the tools |
 | `src/utils/phone.js` | E.164 coercion shared by the consent page and the partner link |
-| `test/mcp.test.js` | 56 checks — `npm run test:mcp` |
-| `test/partner.test.js` | 25 checks — `npm run test:partner` |
+| `test/mcp.test.js` | 58 checks — `npm run test:mcp` |
+| `test/partner.test.js` | 31 checks — `npm run test:partner` |
 | `test/radio_send.test.js` | 16 checks on the write scope and its bounds — `npm run test:radio_send` |
 
 ---

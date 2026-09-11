@@ -270,3 +270,39 @@ differ, Offhand texts the second number a code of its own before asking; from
 here that is the same assertion. Linking never creates an account and refuses
 an account pending deletion, as the consent page does and for the same
 reasons.
+
+## 7 — The account holder's veto on the partner link
+
+Every other route to a connector grant puts a consent page in front of the
+account holder. The partner link does not, by design: it issues the grant on
+Offhand's word that it verified the phone, and nothing here can check that
+word. That trust was also, until now, invisible and unrevocable from this
+side — neither app listed the grant, and only Offhand's own Disconnect could
+take it back. Someone who wants no partner link at all had nothing to say so
+with.
+
+`users.partner_link_enabled`, NOT NULL DEFAULT TRUE, is that sentence.
+`POST /partner/offhand/link` refuses with 403 `link_disabled` when it is
+false, checked in the one file that makes the trust decision, immediately
+after the account is matched and above every branch that could reach a token.
+A per-account column rather than a server setting: the decision belongs to
+the person whose posts and messages the grant would read.
+
+**It stops new links; it does not revoke live ones.** A refresh token already
+issued keeps rotating at `/oauth/token`, which never reads the column.
+Checking it there was considered and rejected: flipping a settings toggle
+would then silently break an assistant someone is still using, mid-sentence,
+with the failure surfacing as an OAuth error in another company's app.
+Revocation should be an act — `POST /partner/offhand/unlink` (Offhand's
+Disconnect), or deleting the Grounders account, whose cascade takes
+`oauth_refresh_tokens` with it. If a grant should ever die the moment the
+switch flips, the honest way is a revoke-on-PATCH in `PATCH /users/me`, not a
+check in the refresh path.
+
+The column is read with `=== false`, not truthiness: on a server whose
+migration has not run yet the column is absent, and absent means "nobody has
+refused", not "everybody has". It is also read across every row that holds
+the number rather than only the row about to be linked — one person can hold
+two rows when their number was written two ways (§6), they are signed in to
+one of them, and the refusal recorded there has to count whichever row the
+match picks.

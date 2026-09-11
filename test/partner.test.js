@@ -14,9 +14,17 @@
  *      is not signed with JWT_SECRET. Linking is a SELECT — it never creates
  *      an account — and nothing in the response identifies the user beyond
  *      their display name.
+ *
+ *   3. The account holder's switch is honoured: users.partner_link_enabled
+ *      false is 403 link_disabled with no token issued at all — on any row
+ *      holding that number, not just the one the ordering picks — true still
+ *      links, and an account that has never touched the switch — including
+ *      a row older than the column — links as before.
  */
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const jwt = require('jsonwebtoken');
 
 const KEY = 'partner-test-key-partner-test-key-partner-test-key';
@@ -30,6 +38,17 @@ const PHONE = '+16045550101';
 const CLOSING_PHONE = '+16045550199';
 // One person's number written the other way: a second row, same digits.
 const TWIN = '22222222-2222-4222-8222-222222222222';
+// An account that has turned partner links off, and one so old its row
+// predates the column entirely.
+const REFUSED = '33333333-3333-4333-8333-333333333333';
+const REFUSED_PHONE = '+16045550133';
+const LEGACY = '44444444-4444-4444-8444-444444444444';
+const LEGACY_PHONE = '+16045550144';
+// One number, two rows: the refusal is on the row its owner is signed in to,
+// and the busier row — the one the ordering picks — never touched the switch.
+const TWIN_OFF = '55555555-5555-4555-8555-555555555555';
+const TWIN_BUSY = '66666666-6666-4666-8666-666666666666';
+const TWIN_OFF_PHONE = '+16045550155';
 
 const sha256 = (v) => crypto.createHash('sha256').update(v).digest('base64url');
 
@@ -39,8 +58,14 @@ run('partner', async () => {
   // token_hash -> { client_id, user_id, revoked }
   const refreshRows = new Map();
   const users = {
-    [ME]: { id: ME, display_name: 'Sam', deletion_pending_at: null, phone: PHONE, last_post_at: new Date() },
+    [ME]: { id: ME, display_name: 'Sam', deletion_pending_at: null, phone: PHONE, last_post_at: new Date(), partner_link_enabled: true },
     [CLOSING]: { id: CLOSING, display_name: 'Gone', deletion_pending_at: new Date(), phone: CLOSING_PHONE },
+    [REFUSED]: { id: REFUSED, display_name: 'Nope', deletion_pending_at: null, phone: REFUSED_PHONE, partner_link_enabled: false },
+    // No partner_link_enabled key at all: the row a server reads before the
+    // migration has added the column. Absent must read as "not refused".
+    [LEGACY]: { id: LEGACY, display_name: 'Old', deletion_pending_at: null, phone: LEGACY_PHONE },
+    [TWIN_OFF]: { id: TWIN_OFF, display_name: '', deletion_pending_at: null, phone: TWIN_OFF_PHONE, partner_link_enabled: false },
+    [TWIN_BUSY]: { id: TWIN_BUSY, display_name: 'Sam', deletion_pending_at: null, phone: TWIN_OFF_PHONE.replace(/D/g, ''), last_post_at: new Date() },
     // The same number written two ways is two rows: `phone` is UNIQUE on the
     // text, and the match is on digits. The empty one must never be the one
     // that gets linked — connecting to it looks like success and then every
@@ -61,11 +86,16 @@ run('partner', async () => {
         // that order so the ordering is what the test is really checking.
         .sort((a, b) => (b.last_post_at ? 1 : 0) - (a.last_post_at ? 1 : 0));
       return {
-        rows: matches.map((u) => ({
-          id: u.id,
-          display_name: u.display_name,
-          deletion_pending_at: u.deletion_pending_at,
-        })),
+        rows: matches.map((u) => {
+          const row = {
+            id: u.id,
+            display_name: u.display_name,
+            deletion_pending_at: u.deletion_pending_at,
+          };
+          // Only the fixtures that have the column get the column.
+          if ('partner_link_enabled' in u) row.partner_link_enabled = u.partner_link_enabled;
+          return row;
+        }),
       };
     }
     if (/INSERT INTO oauth_refresh_tokens/.test(text)) {
@@ -146,6 +176,31 @@ run('partner', async () => {
   check('the refresh token is stored hashed, under client offhand',
     !!stored && stored.params[0] === sha256(ok.json.refresh_token) && stored.params[1] === 'offhand' && stored.params[2] === ME,
     stored && stored.params);
+
+  // ── The account holder's switch ────────────────────────────────────────
+  // The endpoint issues a grant on Offhand's word alone, so the account has
+  // to be able to refuse it. Off stops a new link and nothing else: an
+  // existing grant is not revoked here (that is unlink's job).
+  const offStart = h.queries.length;
+  const off = await link({ phone: REFUSED_PHONE });
+  check('an account with the switch off is 403 link_disabled',
+    off.status === 403 && off.json.error === 'link_disabled', off.json);
+  check('a refused link issues no token: nothing in the body, nothing stored',
+    !('access_token' in off.json) && !('refresh_token' in off.json)
+      && !h.queries.slice(offStart).some((q) => /INSERT INTO oauth_refresh_tokens/.test(q.text)),
+    off.json);
+  const stillOn = await link({ phone: PHONE });
+  check('the switch on still links',
+    stillOn.status === 200 && typeof stillOn.json.refresh_token === 'string', stillOn.status);
+  const legacy = await link({ phone: LEGACY_PHONE });
+  check('a row from before the column existed still links — absent is not refused',
+    legacy.status === 200 && typeof legacy.json.refresh_token === 'string', legacy.status);
+  const twinOff = await link({ phone: TWIN_OFF_PHONE });
+  check('a refusal on either row holding one number refuses the link',
+    twinOff.status === 403 && twinOff.json.error === 'link_disabled', twinOff.json);
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'src', 'db', 'migrate.js'), 'utf8');
+  check('the column is added idempotently and defaults every existing row to TRUE',
+    /ALTER TABLE users ADD COLUMN IF NOT EXISTS partner_link_enabled\s+BOOLEAN NOT NULL DEFAULT TRUE;/.test(migration));
 
   // ── It is a connector token, not an app session ────────────────────────
   const bearer = { Authorization: `Bearer ${ok.json.access_token}` };
