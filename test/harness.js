@@ -21,6 +21,7 @@ for (const key of [
   'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER',
   'FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY',
   'RESEND_API_KEY', 'APP_REVIEW_PHONE', 'APP_REVIEW_OTP',
+  'DEEPGRAM_API_KEY',
 ]) process.env[key] = '';
 
 const verbose = process.env.VERBOSE === '1';

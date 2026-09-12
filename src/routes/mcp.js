@@ -30,9 +30,13 @@ const BASE_INSTRUCTIONS =
   'This connector reads one user\'s Grounders (a location-based photo/video feed '
   + 'shared with friends) and Radio (voice-note, message and file threads with '
   + 'those same friends). Posts carry coordinates, not '
-  + 'place names — interpret the location yourself. Voice notes are never '
-  + 'available; say so rather than guessing what one contained. When you '
-  + 'describe a photo, call fetch on the post first so you have actually seen it.';
+  + 'place names — interpret the location yourself. A voice note reaches you as '
+  + 'a transcript or not at all. A transcript is machine-made: attribute it to '
+  + 'the transcript rather than to the speaker, and expect names and numbers to '
+  + 'be wrong. A voice note without one is still opaque — say so rather than '
+  + 'guessing what it contained. You never hear the audio, so do not write as '
+  + 'though you had. When you describe a photo, call fetch on the post first so '
+  + 'you have actually seen it.';
 
 const READ_ONLY_INSTRUCTIONS = ' Everything here is read-only.';
 

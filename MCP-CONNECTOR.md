@@ -16,8 +16,9 @@ a consent page — see *Offhand, built in* below.
 ```
 Connector URL:  https://<PUBLIC_BASE_URL>/mcp
 Sign in with:   the phone number you use in Grounders or Radio
-Reads:          posts (with photos), friends, Radio messages and files
-Never:          voice notes, phone numbers, anything written
+Reads:          posts (with photos), friends, Radio messages and files,
+                voice notes as their transcripts
+Never:          the audio itself, phone numbers, anything written
 ```
 
 ---
@@ -33,19 +34,20 @@ Never:          voice notes, phone numbers, anything written
 | "Which of my friends has gone quiet?" | `friends` — last post, posts in 30 days, friends since |
 | "What did Dana and I decide about Friday?" | `radio_messages` with `with: "Dana"` |
 | "Find the PDF Jordan shared" | `search` then `fetch message:…` |
+| "What did Dana's voice note say?" | `radio_messages` — a transcribed note reads like any other |
 | "How much have I posted?" | `me` |
 
 Seven read tools, offered to every client:
 
 | Tool | Does |
 |---|---|
-| `search` | Keyword search over captions, posters, friend names, Radio text and file names, workspace names. Returns `{id, title, text, url, kind}` |
-| `fetch` | One item by prefixed id: `post:` (with image), `user:` (profile + recent posts + shared workspaces), `workspace:` (members + recent messages), `message:` (full text, or a file: images as image, text files inline, others as a link) |
+| `search` | Keyword search over captions, posters, friend names, Radio text, voice-note transcripts and file names, workspace names. Returns `{id, title, text, url, kind}` |
+| `fetch` | One item by prefixed id: `post:` (with image), `user:` (profile + recent posts + shared workspaces), `workspace:` (members + recent messages), `message:` (full text, a voice note's transcript, or a file: images as image, text files inline, others as a link) |
 | `feed` | Posts over a window, filtered by person, type or place; returns posts and a per-person summary |
 | `friends` | Friends with activity signals, plus pending requests both ways |
 | `me` | Own account summary, no contact details |
 | `radio_workspaces` | Conversations you are in: members, unread, counts by kind |
-| `radio_messages` | One conversation in order, text in full, files with links |
+| `radio_messages` | One conversation in order, text in full, transcribed voice notes with their transcript, files with links |
 
 `search` and `fetch` are named and shaped to match ChatGPT's knowledge-base
 connector contract, which requires exactly those two. Claude and Gemini do
@@ -108,11 +110,41 @@ exposed.
 
 ### Voice notes
 
-Left out on purpose. The assistant cannot listen, and a link to an audio file
-would only invite it to guess at the contents. `radio_messages` omits them and
-reports how many were skipped; `include_voice_notes: true` lists them as
-"sent a voice note" placeholders (sender, time, duration — no audio) so a
-thread still reads in sequence.
+Words, never audio. The backend transcribes a voice note when it is recorded,
+and `POST /radio/files/:id/transcribe` asks for one that was never made or
+that failed; the connector reads `transcript` off the row and nothing else. A
+link to the audio would only invite the assistant to guess at what is in it,
+so it is still never handed out — not in `radio_messages`, not in `fetch`.
+
+A note that has a transcript is an ordinary readable message: `radio_messages`
+includes it by default, `search` matches on the transcript, and `fetch
+message:…` returns it. Every result that carries one carries a line saying
+transcripts are machine-made and get names, numbers and crosstalk wrong, and
+the `initialize` instructions say the same, because an assistant that quotes a
+transcript as speech will quote a misheard name as fact.
+
+A note without one has nothing to read. It stays out of `radio_messages` and
+out of `search` — an empty hit is worse than no hit — and the number left out
+is reported, so a gap in a thread is visible. `include_voice_notes: true`
+lists those as sender, time and duration, no words, so the thread still reads
+in sequence. Their `note` says which kind of silence it is: nobody has asked
+for a transcript, one is being made, or one was attempted and could not be
+produced. Those are three different answers for an assistant to give, and
+collapsing them into "not available" is what invites a guess.
+
+"One is being made" is bounded. A claim carries the moment it was taken and
+expires after ten minutes, so a job lost to a deploy or a crash is re-askable
+rather than stuck, and an hourly sweeper moves an abandoned one to "could not
+be produced" without anyone having to notice. Separately, each account has a
+daily ceiling on transcribed audio seconds
+(`TRANSCRIBE_DAILY_SECONDS_PER_USER`); a note refused by it is left exactly as
+it was, so it reads here as "nobody has asked" — which is accurate, in that
+nothing was written and nothing was spent.
+
+Transcription changed what the connector can say about a person, not who it
+will say it to. Membership is still checked before any of it: `radio_messages`
+gates on `isMember`, `search` joins `radio_workspace_members` for the signed-in
+user, and `fetch message:…` checks membership before returning a row.
 
 ---
 
@@ -256,9 +288,11 @@ tables of the retired Gmail connector, which are left untouched.
 | `src/routes/partner.js` | The Offhand partner link: a verified phone → connector tokens |
 | `src/services/radio_send.js` | Sending on Radio — the row, the storage charge, the push — shared by the routes and the tools |
 | `src/utils/phone.js` | E.164 coercion shared by the consent page and the partner link |
-| `test/mcp.test.js` | 58 checks — `npm run test:mcp` |
+| `test/mcp.test.js` | 68 checks — `npm run test:mcp` |
 | `test/partner.test.js` | 31 checks — `npm run test:partner` |
+| `src/services/radio_transcribe.js` | Turning a voice note into text — the expiring claim, the per-account spend ceiling, the R2 fetch |
 | `test/radio_send.test.js` | 16 checks on the write scope and its bounds — `npm run test:radio_send` |
+| `test/radio_transcribe.test.js` | 54 checks — `npm run test:radio_transcribe` |
 
 ---
 

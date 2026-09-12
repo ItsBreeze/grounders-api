@@ -306,3 +306,128 @@ the number rather than only the row about to be linked — one person can hold
 two rows when their number was written two ways (§6), they are signed in to
 one of them, and the refusal recorded there has to count whichever row the
 match picks.
+
+## 8 — Voice notes become words (reverses §4)
+
+§4 above records the opposite decision and is kept as written: voice notes
+were omitted because the assistant cannot listen and a link to audio is an
+invitation to guess. What changed is not that judgement but the input. A
+voice note now arrives with a transcript, so there is text to read, and the
+reasoning in §4 never applied to text.
+
+**The transcript is a new column, not `text_content`.** Both the route layer
+and the connector read a non-null `text_content` as "this row is a typed
+message". A transcript parked there would surface, everywhere, as something
+the user sat down and wrote. `radio_files.transcript` /
+`transcript_status` / `transcribed_at` instead, with status NULL meaning
+nobody has asked — which is also the state of every row that predates this
+and of every deploy with no provider key.
+
+**Bytes come from R2 through the S3 client, not the public URL.** This job is
+the first thing on the server that needs the audio itself. Asking R2 with
+`GetObjectCommand` keeps the bytes on a credentialed path, and survives the
+bucket being made private — the only direction that setting ever moves —
+where an HTTP fetch of `R2_PUBLIC_URL` would begin 403ing.
+
+**25 MB, checked against R2's `ContentLength` before the body is read.** An
+oversized object then costs one request and no memory. It is deliberately the
+same order as radio_send's 20 MB cap: both are "one object, in memory, once".
+Deepgram bills by the audio minute, so the cap is a spending limit as much as
+a memory one.
+
+**Reuse is keyed on `r2_key`, not on membership.** `copy-to-self` puts a
+second row over one recording; paying twice would also let the two rows drift
+apart and show different words. The lookup is safe precisely because sharing
+an `r2_key` means sharing the bytes, and the transcript is only ever a
+rendering of bytes the caller can already play. If the bucket is ever made
+private with per-row authorization, that reasoning stops holding and the
+lookup needs a workspace scope.
+
+**A claim expires, because a process does not always come back.**
+`transcript_status = 'pending'` is written by one process and cleared by the
+same one. A deploy, a crash or a Railway restart in between used to leave the
+row pending with nothing recording *when* — `transcribed_at` is written only on
+success and the table has no `updated_at` — so the endpoint answered
+`started:false` / `reason:'already'` forever, the app spun a spinner with no
+exit, and no reaper could be written later without a second migration. So
+`transcript_claimed_at` ships with the feature rather than after the first
+wedged row. Its own column, not a reuse of `transcribed_at`: that one means
+"these are the words and this is when they were made", the reuse lookup orders
+by it and the app and the connector read it back, so stamping a merely-claimed
+row there would make a pending row read as transcribed everywhere.
+
+**Ten minutes, and why not less.** The claim expires after `STALE_AFTER_MS` =
+10 min, and `claim()` will take over one older than that. Too short and it
+steals a job that is still running, which is paying Deepgram twice for one
+recording. Too long and someone stares at a spinner all afternoon. A pending
+row with no stamp at all predates the column, so it is stale by definition.
+
+**The window is only a proof if every step of a running job is bounded, so the
+download got a bound.** The provider POST always had one (`TRANSCRIBE_TIMEOUT_MS`
+= 120s); the R2 `GetObject` had none. The AWS SDK ships `requestTimeout = 0` —
+@smithy/node-http-handler only arms a timer when one is configured — so a
+stalled socket had no ceiling at all and never triggered a retry to replace it.
+A download that hung past ten minutes would have had its row swept to 'failed'
+and re-claimed underneath it: two workers on one row, two Deepgram charges,
+which is the exact thing the window exists to prevent. `fetchAudio` now passes
+`AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)` (2 min) to `send()` — a signal
+rather than a client `requestTimeout` because it bounds the *total*: once it
+fires, every remaining retry attempt fails fast on the already-aborted signal
+instead of starting a fresh clock. Worst legal case is therefore 2 min + 2 min
++ the writes against a ten-minute window, which is arithmetic rather than a
+hope about network weather.
+
+**And a sweeper as well as the expiring claim, because they fix different
+halves.** The claim makes a wedged row *recoverable* — but only by someone
+pressing the button, and until they do the row still says 'pending' and the
+feed still draws a spinner. `sweepStaleClaims` (hourly cron in `server.js`, the
+same shape as `reapDeletedUsers`) turns an abandoned claim into 'failed', which
+is the state the app renders as "couldn't transcribe — tap to retry" and which
+`claim()` has always treated as claimable. Hourly rather than reap_users' daily
+3am: that job's window is fourteen days, this one's is ten minutes.
+
+**A ceiling on what one account can spend, in the unit the provider bills.**
+The per-file guards were real but orthogonal: 25 MB stops one file being
+enormous, and the conditional UPDATE stops one row being paid for twice.
+Neither stops an account recording a thousand short memos.
+`TRANSCRIBE_DAILY_SECONDS_PER_USER` (default 7200 — two hours of audio per
+rolling 24 hours) is summed off `transcript_claimed_at`, counting 'pending'
+alongside 'ready' so a burst of simultaneous asks cannot all read a cold total.
+Seconds, not files, because a hundred five-second memos and one hour-long
+recording are not the same money. Two hours specifically because it is twice
+the longest recording the 25 MB cap admits — a ceiling that can refuse a legal
+file is a ceiling that generates bug reports — and because it bounds a runaway
+at roughly half a dollar per account per day instead of at nothing.
+
+**A duration is a positive number of milliseconds or it is not a duration.**
+`duration_ms` comes off the client and `POST /radio/workspaces/:id/files` never
+range-checks it, so the client controls the number the ceiling charges by
+completely: it can omit it, send `0`, or send a negative. All three are charged
+`ASSUMED_DURATION_MS` (60s). NULL was the obvious one; `0` is the one that is
+easy to miss, because NULL at least looks like missing data while `0` looks
+like a measurement — and either counting as free is the entire way around the
+ceiling for the cost of one field in a JSON body. A negative is worse than
+free: summed as declared it is a *credit*, so one note claiming minus an hour
+would pay for the next hour of real ones. The rule is applied in both places
+the money is counted — `CASE WHEN duration_ms IS NULL OR duration_ms <= 0` in
+the SUM, and the same test on the claimed row's own length — and `recordFile`
+now stores a non-positive declared duration as NULL so the number never reaches
+the column at all. The guess is short-lived either way: `markReady` backfills
+the column from what the provider measured.
+
+**Hitting the ceiling is an answer, not an error.** `reason:'daily_limit'`
+alongside 'not_configured' and 'already', all of them 200s, because the app
+needs a sentence to put under the tile and a 500 there reads as "the app is
+broken". The claim is handed straight back — status and stamp both NULL — so
+nothing is spent, nothing is left pending, and the ask simply works again once
+the window moves. It is charged to the row's owner rather than to whoever
+pressed the button: recording is the unbounded axis and is always charged to
+the recorder, while the manual endpoint can only ever buy a given row one
+transcript, since a 'ready' row is not claimable.
+
+**The consent page and §4's promise had to be rewritten with it.** The grant
+text in `mcp_oauth.js` said "Voice notes stay out entirely" — the sentence a
+person reads before approving the connector. A privacy promise that the code
+has stopped keeping is worse than one that was never made, so it now says
+what is true: the connector reads a transcript where one exists and never the
+audio.

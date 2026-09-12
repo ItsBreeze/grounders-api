@@ -17,13 +17,13 @@ const {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
-  GetObjectCommand,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const pool = require('../db/pool');
 const { requireAuth } = require('../middleware/auth');
 const notifications = require('../services/notifications');
 const radioSend = require('../services/radio_send');
+const radioTranscribe = require('../services/radio_transcribe');
 
 router.use(requireAuth);
 
@@ -41,7 +41,6 @@ const ALLOWED_KINDS = ['voice_note', 'file'];
 const VOICE_MIME = 'audio/mp4';
 const VOICE_EXT = 'm4a';
 const PRESIGN_TTL = 600;
-const DOWNLOAD_TTL = 3600;
 
 function r2() {
   return new S3Client({
@@ -643,6 +642,12 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
       `SELECT f.id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
               f.size_bytes, f.duration_ms, f.text_content, f.manual_order,
               f.group_id, f.created_at,
+              -- Voice notes carry their transcript here. NULL status means
+              -- nobody has asked (or no provider is configured); the tile
+              -- shows the transcript when it is 'ready' and the ask button
+              -- otherwise. Never folded into text_content — that column is
+              -- what makes a row a typed message.
+              f.transcript, f.transcript_status,
               u.display_name AS owner_name
          FROM radio_files f
          JOIN users u ON u.id = f.owner_id
@@ -767,7 +772,8 @@ router.post('/files/:id/copy-to-self', async (req, res, next) => {
     // Source must exist and be in a workspace the caller is a member of.
     const { rows: [src] } = await pool.query(
       `SELECT id, workspace_id, kind, r2_key, mime_type, filename,
-              duration_ms, text_content
+              duration_ms, text_content, transcript, transcript_status,
+              transcribed_at
          FROM radio_files
         WHERE id = $1`,
       [fileId]
@@ -806,19 +812,86 @@ router.post('/files/:id/copy-to-self', async (req, res, next) => {
     }
 
     // Insert copy. size_bytes = 0 (storage already counted on original).
+    // A finished transcript comes with it: the copy points at the same R2
+    // object, so it is the same words either way, and carrying them over
+    // means the two copies can never show different text. Anything short of
+    // 'ready' — a job in flight, a failure — is not carried; the copy simply
+    // has not been asked about yet.
+    const carry = src.transcript_status === 'ready' && src.transcript ? src : null;
     const { rows: [copy] } = await pool.query(
       `INSERT INTO radio_files
          (workspace_id, owner_id, kind, r2_key, mime_type, filename,
-          size_bytes, duration_ms, text_content)
-       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8)
+          size_bytes, duration_ms, text_content,
+          transcript, transcript_status, transcribed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11)
        RETURNING id, workspace_id, kind, mime_type, filename, duration_ms,
-                 text_content, created_at`,
+                 text_content, transcript, transcript_status, created_at`,
       [
         selfWsId, myId, src.kind, src.r2_key, src.mime_type, src.filename,
         src.duration_ms, src.text_content,
+        carry ? carry.transcript : null,
+        carry ? 'ready' : null,
+        carry ? carry.transcribed_at : null,
       ]
     );
     res.status(201).json({ ...copy, workspace_id: selfWsId });
+  } catch (err) { next(err); }
+});
+
+// POST /radio/files/:id/transcribe — text for one voice note, for the button
+// in ItsRadio. Any member of the workspace the note is in may ask.
+//
+// Idempotent: the claim inside radio_transcribe is a conditional UPDATE, so a
+// second ask while the first is still running answers with the same 'pending'
+// row instead of starting a second job and paying twice. A row that ended
+// 'failed' is claimable again, which makes this a retry as well as a first
+// run — and so is one whose claim has gone stale, so a job lost to a deploy or
+// a crash is a button press away rather than a permanent spinner.
+//
+// The answer is always the row's own state, read back after the claim.
+// `started` says whether this call is the one that took it, and when it is
+// not, `reason` says why. Three reasons, all of them 200s with a sentence the
+// app can show rather than errors it would render as a broken screen:
+//
+//   'already'         a live claim, or a transcript already there
+//   'not_configured'  no provider key; nothing was written, status still null
+//   'daily_limit'     this account has committed its day's audio seconds to
+//                     the provider. Nothing was written either — the claim is
+//                     handed straight back — so the status is null again and
+//                     the ask works once the rolling window moves.
+router.post('/files/:id/transcribe', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const fileId = req.params.id;
+
+    const { rows: [f] } = await pool.query(
+      `SELECT id, workspace_id, kind FROM radio_files WHERE id = $1`,
+      [fileId]
+    );
+    if (!f) return res.status(404).json({ error: 'File not found' });
+    if (!(await isMember(f.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+    if (f.kind !== 'voice_note') {
+      return res.status(400).json({ error: 'Only a voice note can be transcribed' });
+    }
+
+    const { started, reason } = await radioTranscribe.request(fileId);
+
+    const { rows: [after] } = await pool.query(
+      `SELECT transcript, transcript_status, transcribed_at
+         FROM radio_files WHERE id = $1`,
+      [fileId]
+    );
+
+    res.json({
+      id: fileId,
+      transcript: after?.transcript ?? null,
+      transcript_status: after?.transcript_status ?? null,
+      transcribed_at: after?.transcribed_at ?? null,
+      started,
+      ...(started ? {} : { reason }),
+    });
   } catch (err) { next(err); }
 });
 

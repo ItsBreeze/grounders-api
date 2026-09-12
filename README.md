@@ -205,8 +205,9 @@ is part of the safety.
 `POST /mcp` is a Model Context Protocol server: a user adds this API's URL as a
 custom connector in Claude, ChatGPT or Gemini, signs in once with their phone
 number, and their assistant can then read their Grounders posts (including the
-photos), friends, and Radio messages and files mid-conversation. Read-only, no
-voice notes, no phone numbers. Both apps share this API, so one connector
+photos), friends, and Radio messages and files mid-conversation. Read-only; a
+voice note reaches it as its transcript where one has been made, never as
+audio; no phone numbers. Both apps share this API, so one connector
 covers both — built to the same shape as Offhand's, so the two sit side by
 side in an assistant's connector list.
 

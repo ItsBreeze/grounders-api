@@ -17,6 +17,7 @@ const { v4: uuid } = require('uuid');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const pool = require('../db/pool');
 const notifications = require('./notifications');
+const radioTranscribe = require('./radio_transcribe');
 
 // A file sent through the connector is downloaded into memory first, so this
 // is a memory cap as much as a policy one.
@@ -113,6 +114,15 @@ async function sendText({ userId, workspaceId, content }) {
  */
 async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename, sizeBytes, durationMs }) {
   const size = Number.isFinite(sizeBytes) ? Math.round(sizeBytes) : 0;
+  // A duration is a positive number of milliseconds or it is not a duration.
+  // This number is client-supplied and the route does not range-check it, and
+  // downstream it is money: services/radio_transcribe charges the day's
+  // ceiling by declared length and charges an unknown length an assumed
+  // minute. That only holds if a declared 0 — or a negative, which would be a
+  // credit against the account's other notes — lands in "unknown" rather than
+  // in "free". NULL is "unknown".
+  const rounded = Number.isFinite(durationMs) ? Math.round(durationMs) : null;
+  const duration = rounded !== null && rounded > 0 ? rounded : null;
   const { rows: [row] } = await pool.query(
     `WITH ins AS (
        INSERT INTO radio_files
@@ -125,10 +135,15 @@ async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename
      SELECT * FROM ins`,
     [
       uuid(), workspaceId, userId, kind, r2Key,
-      mimeType || null, filename || null, size,
-      Number.isFinite(durationMs) ? Math.round(durationMs) : null,
+      mimeType || null, filename || null, size, duration,
     ],
   );
+
+  // A voice note transcribes itself. Fire-and-forget in the strong sense: it
+  // is not awaited, it cannot reject, and a provider that is down or absent
+  // leaves this send exactly as it would have been. With no provider key
+  // configured it does nothing at all and transcript_status stays NULL.
+  if (kind === 'voice_note' && row?.id) radioTranscribe.queue(row.id);
 
   notifications.fireAndForget((async () => {
     const to = await recipients(workspaceId, userId);

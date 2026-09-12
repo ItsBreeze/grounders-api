@@ -26,6 +26,9 @@ const STRANGER = '33333333-3333-4333-8333-333333333333';
 const POST = '44444444-4444-4444-8444-444444444444';
 const WS = '55555555-5555-4555-8555-555555555555';
 const MSG = '66666666-6666-4666-8666-666666666666';
+const VN_READY = '88888888-8888-4888-8888-888888888888';
+const VN_NEVER = '99999999-9999-4999-8999-999999999999';
+const VN_FAILED = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 const CLIENT = { client_id: 'gc_test', client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] };
 const REDIRECT = CLIENT.redirect_uris[0];
@@ -45,6 +48,20 @@ const POST_ROW = {
   visibility: 'friends', captured_at: ago(30), posted_at: ago(29), reaction_count: 2,
   archived_at: null, deletion_pending_at: null,
 };
+
+// The three states a voice note can be in for the connector: transcribed,
+// never asked about, and asked about and failed. The last two are different
+// answers for an assistant to give, so they are different rows here.
+const TRANSCRIPT = 'bring the tent poles, I have the rest';
+const voiceRow = (id, status, transcript, hoursAgo) => ({
+  id, workspace_id: WS, kind: 'voice_note', owner_id: FRIEND, owner_name: 'Sam',
+  r2_key: 'radio/voice/one.m4a', mime_type: 'audio/mp4', filename: null, size_bytes: 0,
+  duration_ms: 4200, text_content: null, transcript, transcript_status: status,
+  created_at: ago(hoursAgo),
+});
+const VOICE_READY = voiceRow(VN_READY, 'ready', TRANSCRIPT, 3);
+const VOICE_NEVER = voiceRow(VN_NEVER, null, null, 4);
+const VOICE_FAILED = voiceRow(VN_FAILED, 'failed', null, 5);
 
 const form = (obj) => Object.entries(obj).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
 
@@ -119,9 +136,22 @@ run('mcp', async () => {
       return { rows: params[0] === WS && params[1] === ME ? [{ 1: 1 }] : [] };
     }
     if (/FROM radio_files f JOIN users u ON u\.id = f\.owner_id\s+WHERE f\.workspace_id/.test(text)) {
-      return { rows: [
+      // Newest first, as the real ORDER BY gives them. A transcribed note is
+      // returned whatever the filter says; the other two only when the
+      // kind condition is absent, which is what include_voice_notes does.
+      const rows = [
         { id: MSG, workspace_id: WS, kind: 'text', owner_id: FRIEND, owner_name: 'Sam', text_content: 'see you at 7', created_at: ago(2) },
-      ] };
+        VOICE_READY,
+      ];
+      if (!/f\.kind <> 'voice_note'/.test(text)) rows.push(VOICE_NEVER, VOICE_FAILED);
+      return { rows };
+    }
+    if (/FROM radio_files f\s+JOIN radio_workspace_members me/.test(text)) {
+      return { rows: [{ ...VOICE_READY, workspace_name: 'Trip' }] };
+    }
+    if (/FROM radio_files f\s+JOIN users u ON u\.id = f\.owner_id\s+JOIN radio_workspaces w/.test(text)) {
+      const row = { [VN_READY]: VOICE_READY, [VN_FAILED]: VOICE_FAILED }[params[0]];
+      return { rows: row ? [{ ...row, workspace_name: 'Trip' }] : [] };
     }
     if (/COUNT\(\*\)::int AS n FROM radio_files f/.test(text)) return { rows: [{ n: 3 }] };
     return { rows: [], rowCount: 0 };
@@ -195,8 +225,9 @@ run('mcp', async () => {
     !!otpInsert && otpInsert.params[1] === PHONE && /^\$2[aby]\$/.test(otpInsert.params[2]),
     otpInsert && otpInsert.params);
   check('DEV_MODE shows the code on the page (no SMS sender configured)', /Dev code/.test(sent.text));
-  check('the code form carries the grant text and says read-only, no voice, no phone numbers',
-    /read-only/.test(sent.text) && /Voice notes stay/.test(sent.text) && /phone number/.test(sent.text));
+  check('the code form carries the grant text and says read-only, no audio, no phone numbers',
+    /read-only/.test(sent.text) && /never hears a\s+voice note/.test(sent.text)
+    && /never the audio/.test(sent.text) && /phone number/.test(sent.text));
 
   // ── Code → redirect with auth code ─────────────────────────────────────
   const wrong = await postForm('/oauth/authorize/approve', { ...flow, phone: PHONE, code: '000000' });
@@ -353,21 +384,79 @@ run('mcp', async () => {
   const rmStart = h.queries.length;
   const rm = await call('radio_messages', { workspace_id: WS });
   const rmSql = h.queries.slice(rmStart).find((q) => /FROM radio_files f JOIN users u ON u\.id = f\.owner_id/.test(q.text));
+  const rmMsgs = payload(rm).messages;
+  const rmText = rmMsgs.find((m) => m.kind === 'text');
   check('radio_messages reads the thread in order with full text',
-    rm.status === 200 && payload(rm).messages[0].text === 'see you at 7' && payload(rm).messages[0].from === 'Sam', payload(rm));
+    rm.status === 200 && rmText && rmText.text === 'see you at 7' && rmText.from === 'Sam'
+      && rmMsgs[rmMsgs.length - 1].id === `message:${MSG}`, payload(rm));
   check('radio_messages SQL leaves voice notes out by default', !!rmSql && /kind <> 'voice_note'/.test(rmSql.text));
   check('the number of omitted voice notes is reported', payload(rm).voice_notes_omitted === 3, payload(rm));
+
+  // ── Transcripts: a voice note with words is an ordinary message ─────────
+  const rmVoice = rmMsgs.find((m) => m.id === `message:${VN_READY}`);
+  check('a transcribed voice note arrives without include_voice_notes, carrying its transcript',
+    !!rmVoice && rmVoice.transcript === TRANSCRIPT && rmVoice.transcript_status === 'ready' && !rmVoice.note,
+    rmVoice);
+  check('the default SQL keeps out only the voice notes that have no transcript',
+    !!rmSql && /f\.kind <> 'voice_note' OR \(f\.transcript_status = 'ready' AND f\.transcript IS NOT NULL\)/.test(rmSql.text),
+    rmSql && rmSql.text);
+  const omitSql = h.queries.slice(rmStart).find((q) => /COUNT\(\*\)::int AS n FROM radio_files f/.test(q.text));
+  check('the omitted count counts untranscribed voice notes only, not the ones now readable',
+    !!omitSql && /f\.transcript_status IS DISTINCT FROM 'ready' OR f\.transcript IS NULL/.test(omitSql.text),
+    omitSql && omitSql.text);
+  check('a result carrying a transcript says, once, that transcripts are machine-made',
+    /machine/i.test(payload(rm).transcript_note || '') && /wrong/i.test(payload(rm).transcript_note || ''),
+    payload(rm).transcript_note);
+
+  const qStart = h.queries.length;
+  await call('radio_messages', { workspace_id: WS, query: 'tent' });
+  const qSql = h.queries.slice(qStart).find((q) => /FROM radio_files f JOIN users u ON u\.id = f\.owner_id/.test(q.text));
+  check('radio_messages\'s own query filter reads the transcripts as well as the text and filenames',
+    !!qSql && /f\.transcript ILIKE/.test(qSql.text) && qSql.params.includes('%tent%'),
+    qSql && qSql.text);
   check('no read marker was written (reading via the connector is side-effect free)',
     !h.queries.some((q) => /UPDATE radio_workspace_members|radio_enabled = true/.test(q.text)));
 
   const vStart = h.queries.length;
-  await call('radio_messages', { workspace_id: WS, include_voice_notes: true });
+  const withVoice = await call('radio_messages', { workspace_id: WS, include_voice_notes: true });
   const vSql = h.queries.slice(vStart).find((q) => /FROM radio_files f JOIN users u ON u\.id = f\.owner_id/.test(q.text));
   check('include_voice_notes lifts the kind filter', !!vSql && !/kind <> 'voice_note'/.test(vSql.text));
 
+  // "Nobody asked" and "we asked and could not" are different answers for the
+  // assistant to give. Collapsing them into one line is what invites a guess.
+  const never = payload(withVoice).messages.find((m) => m.id === `message:${VN_NEVER}`);
+  const failed = payload(withVoice).messages.find((m) => m.id === `message:${VN_FAILED}`);
+  check('an untranscribed voice note carries a duration, no words, and says which silence it is',
+    !!never && !!failed && !never.transcript && !failed.transcript
+      && never.duration_ms === 4200 && never.transcript_status === 'none' && failed.transcript_status === 'failed'
+      && never.note !== failed.note && /no transcript has been made/i.test(never.note)
+      && /could not be produced/i.test(failed.note),
+    { never: never && never.note, failed: failed && failed.note });
+
   // ── search shape ───────────────────────────────────────────────────────
+  const srStart = h.queries.length;
   const sr = await call('search', { query: 'sunset' });
   check('search returns {id,title,text,url} results with kinds', sr.status === 200 && payload(sr).results.every((r) => r.id && r.title && 'text' in r && r.url && r.kind), payload(sr));
+  const srSql = h.queries.slice(srStart).find((q) => /FROM radio_files f\s+JOIN radio_workspace_members me/.test(q.text));
+  const srVoice = payload(sr).results.find((r) => r.id === `message:${VN_READY}`);
+  check('search matches a voice note on its transcript and hands it back as its own kind',
+    !!srSql && /f\.transcript ILIKE \$2/.test(srSql.text) && !!srVoice
+      && srVoice.kind === 'radio_voice_note' && srVoice.text.includes(TRANSCRIPT),
+    { sql: srSql && srSql.text, hit: srVoice });
+  check('search never returns a voice note that has no transcript — no empty hits',
+    !!srSql && /f\.kind <> 'voice_note' OR \(f\.transcript_status = 'ready' AND f\.transcript IS NOT NULL\)/.test(srSql.text),
+    srSql && srSql.text);
+
+  // ── fetch on a voice note ──────────────────────────────────────────────
+  const fv = await call('fetch', { id: `message:${VN_READY}` });
+  check('fetch on a transcribed voice note returns the transcript, with the caveat and no audio',
+    payload(fv).transcript === TRANSCRIPT && /machine/i.test(payload(fv).transcript_note || '')
+      && !/\.m4a/.test(fv.json.result.content[0].text) && fv.json.result.content.length === 1,
+    payload(fv));
+  const fvNone = await call('fetch', { id: `message:${VN_FAILED}` });
+  check('fetch on a voice note with no transcript returns words nowhere and a link nowhere',
+    !payload(fvNone).transcript && !payload(fvNone).url && /could not be produced/i.test(payload(fvNone).note || ''),
+    payload(fvNone));
 
   // ── Unknown tool / method ──────────────────────────────────────────────
   const unk = await call('nope', {});

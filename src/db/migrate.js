@@ -371,6 +371,61 @@ CREATE INDEX IF NOT EXISTS idx_radio_files_workspace ON radio_files(workspace_id
 CREATE INDEX IF NOT EXISTS idx_radio_files_owner     ON radio_files(owner_id);
 CREATE INDEX IF NOT EXISTS idx_radio_files_group     ON radio_files(group_id);
 
+-- Voice-note transcripts. Deliberately NOT text_content: the route layer and
+-- the connector both read a non-null text_content as "this row is a typed
+-- message", so a transcript parked there would surface as something the user
+-- never wrote. transcript_status is NULL when nobody has ever asked (which is
+-- also the state on a deploy with no provider key — the feature is inert),
+-- then 'pending' → 'ready' | 'failed'.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS transcript        TEXT;
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS transcript_status TEXT;
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS transcribed_at    TIMESTAMPTZ;
+
+-- When the row's CURRENT claim was taken — written by the same conditional
+-- UPDATE that sets 'pending', so a row is never claimed and unstamped.
+--
+-- Its own column rather than a reuse of transcribed_at, which means "these are
+-- the words, and this is when they were made": existingForKey orders by it,
+-- and the endpoint, the feed and the connector all read it back. A row that is
+-- merely claimed, stamped there, would read everywhere as transcribed — the
+-- opposite of true — and the reuse lookup would start preferring rows that
+-- have no transcript yet.
+--
+-- Why it has to exist at all: transcribed_at is written only on success and
+-- this table has no updated_at, so a process that dies between the claim and
+-- the outcome (a deploy, a crash, a Railway restart) used to leave the row
+-- 'pending' with nothing at all recording when. The endpoint then answered
+-- 'already' forever and the app spun forever, and no reaper could be written
+-- later without a second migration. This is that migration, going out with the
+-- feature rather than after the first wedged row.
+--
+-- NULL on every row that predates this column. A 'pending' row with no stamp
+-- is therefore from before the deploy that added the column, which makes it
+-- stale by definition — both claim() and the sweeper read it that way.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS transcript_claimed_at TIMESTAMPTZ;
+
+-- POST /radio/files/:id/copy-to-self makes a second row over the same R2
+-- object, so one recording can back several ids. Before paying a provider we
+-- look for a transcript already made for this r2_key; this partial index is
+-- what makes that lookup cheap, and it stays tiny because it only covers rows
+-- that actually have one.
+CREATE INDEX IF NOT EXISTS idx_radio_files_transcript_key
+  ON radio_files(r2_key) WHERE transcript_status = 'ready';
+
+-- The sweeper's scan: claims still 'pending' past the staleness window, across
+-- every workspace. Partial, so it only ever holds rows with a job in flight —
+-- a handful at any moment, and empty most of the time.
+CREATE INDEX IF NOT EXISTS idx_radio_files_transcript_pending
+  ON radio_files(transcript_claimed_at) WHERE transcript_status = 'pending';
+
+-- The per-account daily spend lookup: everything one owner has claimed inside
+-- the last 24 hours. Claimed rows are a thin slice of radio_files — most rows
+-- are files and typed messages that never go near a provider — so the partial
+-- predicate keeps this index small as well.
+CREATE INDEX IF NOT EXISTS idx_radio_files_transcript_spend
+  ON radio_files(owner_id, transcript_claimed_at)
+  WHERE transcript_claimed_at IS NOT NULL;
+
 
 -- ─── OAuth (for the MCP connector) ─────────────────────────────────────────
 -- Claude, ChatGPT and Gemini reach a user's Grounders + Radio through one MCP

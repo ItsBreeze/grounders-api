@@ -11,7 +11,8 @@
     "test:friends_phone": "node test/friends_phone.test.js",
     "test:mcp": "node test/mcp.test.js",
     "test:partner": "node test/partner.test.js",
-    "test:radio_send": "node test/radio_send.test.js"
+    "test:radio_send": "node test/radio_send.test.js",
+    "test:radio_transcribe": "node test/radio_transcribe.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

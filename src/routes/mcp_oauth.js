@@ -267,8 +267,10 @@ const GRANT_TEXT = (name) => `
     <strong>${escapeHtml(name)}</strong> will be able to read your Grounders posts
     (photos, videos, captions, where and when), your friends list, and your
     Radio workspaces — messages and shared files. It is read-only: it cannot
-    post, message, react, add friends or delete anything. Voice notes stay
-    out entirely, and it never sees your phone number or anyone else's.
+    post, message, react, add friends or delete anything. It never hears a
+    voice note — it reads the text of one only where a transcript has been
+    made, and never the audio — and it never sees your phone number or
+    anyone else's.
   </div>`;
 
 router.get('/oauth/authorize', async (req, res, next) => {
