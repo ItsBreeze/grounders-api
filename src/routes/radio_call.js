@@ -87,7 +87,20 @@ router.post('/', async (req, res, next) => {
     const raw = Array.isArray(req.body.callee_ids)
       ? req.body.callee_ids
       : [req.body.callee_id].filter(Boolean);
-    const callees = [...new Set(raw.map((v) => (v || '').toString()).filter((v) => v && v !== myId))];
+    const asked = [...new Set(raw.map((v) => (v || '').toString()).filter(Boolean))];
+    // Calling YOURSELF is allowed, and it is a real feature rather than a hole
+    // left open: one account, two devices, and the phone in your pocket rings
+    // the tablet on the desk. It is also the only call a person can place
+    // alone, which makes it the only way to try calling without a second
+    // human. It works because the Agora uid is per LEG, not per person — see
+    // radio_call.uidFor — so the two devices are two participants even though
+    // they are one user.
+    //
+    // The self-call is the whole callee list or it is not a self-call: mixing
+    // yourself into a group alongside other people would mean two of your own
+    // devices plus everyone else, which nothing downstream is built for.
+    const isSelfCall = asked.length === 1 && asked[0] === myId;
+    const callees = isSelfCall ? asked : asked.filter((v) => v !== myId);
     if (!callees.length) return res.status(400).json({ error: 'callee_id required' });
     if (callees.length + 1 > MAX_PARTICIPANTS) {
       return res.status(400).json({ error: `A call holds at most ${MAX_PARTICIPANTS} people` });
@@ -114,6 +127,10 @@ router.post('/', async (req, res, next) => {
 
     // The caller is on the call the moment it exists — they are already in
     // the channel — and the callees are guests until they answer.
+    // A self-call writes ONE row, not two: the primary key is
+    // (call_id, user_id) and both legs are the same user. That is the honest
+    // shape — there is one person on this call, on two devices — and it keeps
+    // the keep record, the allowance and the Offhand push all counting once.
     await pool.query(
       `INSERT INTO radio_call_participants (call_id, user_id, joined_at)
        SELECT $1, u, CASE WHEN u = $2 THEN NOW() ELSE NULL END
@@ -127,7 +144,8 @@ router.post('/', async (req, res, next) => {
       radioCall.ring({ call, callerName, workspaceName: wsName, calleeId });
     }
 
-    res.status(201).json(await radioCall.callPayload(call, myId));
+    // Leg 'a': this device created the call.
+    res.status(201).json(await radioCall.callPayload(call, myId, 'a'));
   } catch (err) { next(err); }
 });
 
@@ -155,7 +173,9 @@ router.post('/:id/token', async (req, res, next) => {
     if (call.state === 'ended' || call.state === 'declined' || call.state === 'missed') {
       return res.status(409).json({ error: 'That call has ended' });
     }
-    res.json(await radioCall.callPayload(call, req.user.id));
+    // A fresh token is only ever asked for by a device that is joining or
+    // rejoining as the answering side, so it gets leg 'b'.
+    res.json(await radioCall.callPayload(call, req.user.id, 'b'));
   } catch (err) { next(err); }
 });
 
@@ -181,7 +201,9 @@ router.post('/:id/answer', async (req, res, next) => {
         RETURNING *`,
       [call.id],
     );
-    res.json(await radioCall.callPayload(rows[0] || call, myId));
+    // Leg 'b': this device answered. On a self-call that is what keeps the
+    // two devices apart in the channel.
+    res.json(await radioCall.callPayload(rows[0] || call, myId, 'b'));
   } catch (err) { next(err); }
 });
 

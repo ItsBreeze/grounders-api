@@ -294,6 +294,62 @@ run('radio_call', async () => {
     check('create: a call holds at most four people', crowd.status === 400, crowd.status);
   }
 
+  // ── 4b. Calling your own other device ─────────────────────
+  //
+  // One account, two devices. It is a real feature — the phone in your pocket
+  // rings the tablet on the desk — and it is also the only call a person can
+  // place alone, which makes it the only way to try calling without arranging
+  // a second human.
+  {
+    const state = freshState();
+    h.setQueryHandler(handlerFor(state));
+    const r = await h.request('POST', '/radio/calls', {
+      ...auth(ME), body: { workspace_id: WS, callee_id: ME },
+    });
+    check('self-call: calling yourself is allowed', r.status === 201, r.status);
+    check('self-call: the callee is you', state.inserted?.params[3] === ME);
+    // The primary key is (call_id, user_id), so one person on two devices is
+    // one row. Both legs are the same participant and the keep record, the
+    // allowance and the Offhand push all count once.
+    check('self-call: one participant row, not two',
+      (state.participantInsert?.params[2] || []).length === 2
+        && new Set(state.participantInsert.params[2]).size === 1,
+      state.participantInsert?.params[2]);
+
+    // THE PART THAT MAKES IT WORK. Agora refuses two clients the same uid —
+    // the second join kicks the first off — so if the uid were per person,
+    // the two devices would fight over one identity and the call would never
+    // connect. The leg is what separates them.
+    const legA = r.json?.uid;
+    const answered = await h.request('POST', `/radio/calls/${CALL}/answer`, { ...auth(ME), body: {} });
+    const legB = answered.json?.uid;
+    check('self-call: the two devices get different Agora uids', legA !== legB, { legA, legB });
+    check('self-call: and both are legal uids',
+      legA > 0 && legB > 0 && legA < 2 ** 32 && legB < 2 ** 32, { legA, legB });
+    check('self-call: leg a is what create hands out',
+      legA === radioCall.uidFor(ME, 'a'), legA);
+    check('self-call: leg b is what answer hands out',
+      legB === radioCall.uidFor(ME, 'b'), legB);
+  }
+  {
+    // Yourself mixed into a group would mean two of your own devices plus
+    // everybody else, which nothing downstream is built for. Dropped, and the
+    // call proceeds as an ordinary one to the others.
+    const state = freshState();
+    h.setQueryHandler(handlerFor(state));
+    const r = await h.request('POST', '/radio/calls', {
+      ...auth(ME), body: { workspace_id: WS, callee_ids: [ME, FRIEND] },
+    });
+    check('self-call: you are dropped from a group you are also in',
+      r.status === 201 && state.inserted?.params[3] === FRIEND, state.inserted?.params[3]);
+  }
+  {
+    // A call between two DIFFERENT accounts is unaffected: the legs are
+    // already distinct by user id, and this must not have changed them.
+    check('two-party: the caller and callee still differ by person',
+      radioCall.uidFor(ME, 'a') !== radioCall.uidFor(FRIEND, 'b'));
+  }
+
   // ── 5. A group call (Phase 2) ────────────────────────────────────────────
   {
     const third = '77777777-7777-4777-8777-777777777777';

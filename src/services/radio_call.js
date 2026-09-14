@@ -63,8 +63,20 @@ function isConfigured() {
  * what authorises a join, and this only has to be the same number every time
  * for the same person.
  */
-function uidFor(userId) {
-  const digest = crypto.createHash('sha256').update(String(userId)).digest();
+function uidFor(userId, leg = 'a') {
+  // The LEG, not just the person. Agora identifies a participant in a channel
+  // by uid and refuses two clients the same one — the second join kicks the
+  // first off. That is fine while every participant is a different account,
+  // and it is exactly wrong for the case this argument exists for: one person
+  // calling their OWN other device, where both ends are the same user id.
+  //
+  // 'a' is whoever created the call, 'b' is whoever answered it. Which leg a
+  // device is on is decided by the endpoint that minted its token — create
+  // hands out 'a', answer and token hand out 'b' — so no device id has to
+  // travel, and a person calling themselves gets two distinct uids out of one
+  // account. For a call between two different accounts the legs are already
+  // distinct by user id, and this changes nothing about them.
+  const digest = crypto.createHash('sha256').update(`${userId}:${leg}`).digest();
   // Mask to 31 bits so the value is comfortably inside Agora's uint32 and
   // never negative when it crosses a signed boundary in a client SDK.
   const n = digest.readUInt32BE(0) & 0x7fffffff;
@@ -133,11 +145,15 @@ function recordingAllowed(participants) {
 
 /**
  * The shape every call route answers with, so the client has one parser.
- * `token` is minted for `forUserId` and nobody else.
+ * `token` is minted for `forUserId` on `leg` and nobody else.
+ *
+ * The leg matters only when a person calls their own other device; see uidFor.
+ * Callers pass 'a' from the create route and 'b' from answer and token, which
+ * is the whole protocol.
  */
-async function callPayload(call, forUserId) {
+async function callPayload(call, forUserId, leg = 'a') {
   const participants = await participantsOf(call.id);
-  const minted = mintToken({ channel: call.channel, uid: uidFor(forUserId) }) || {};
+  const minted = mintToken({ channel: call.channel, uid: uidFor(forUserId, leg) }) || {};
   return {
     call_id: call.id,
     workspace_id: call.workspace_id,
@@ -148,7 +164,7 @@ async function callPayload(call, forUserId) {
     channel: call.channel,
     app_id: process.env.AGORA_APP_ID || null,
     token: minted.token || null,
-    uid: minted.uid || uidFor(forUserId),
+    uid: minted.uid || uidFor(forUserId, leg),
     expires_at: minted.expires_at || null,
     started_at: call.started_at,
     answered_at: call.answered_at,
