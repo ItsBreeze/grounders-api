@@ -642,6 +642,12 @@ router.get('/workspaces/:id/files', async (req, res, next) => {
       `SELECT f.id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
               f.size_bytes, f.duration_ms, f.text_content, f.manual_order,
               f.group_id, f.created_at,
+              -- A kept call's provenance. The apps already draw a row with
+              -- this set as a call rather than a voice memo; leaving it out
+              -- of the select meant every recorded call arrived in the feed
+              -- disguised as an ordinary memo, with the column sitting in
+              -- the table one line away.
+              f.call_id,
               -- Voice notes carry their transcript here. NULL status means
               -- nobody has asked (or no provider is configured); the tile
               -- shows the transcript when it is 'ready' and the ask button

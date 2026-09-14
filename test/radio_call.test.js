@@ -167,6 +167,13 @@ function handlerFor(state) {
     if (/FROM radio_call_participants p\s+JOIN radio_calls c/.test(text)) {
       return { rows: state.onCall.includes(params[1]) && params[0] === CALL ? [{ '?column?': 1 }] : [] };
     }
+    // The workspace feed. Every kept call comes back through here, so this
+    // is where a missing column stops being a schema detail and becomes a
+    // call that reads as a voice memo on the phone.
+    if (/FROM radio_files f\s+JOIN users u/.test(text)) {
+      state.feedQuery = { text, params };
+      return { rows: [{ id: FILE, kind: 'voice_note', owner_id: ME, call_id: CALL, duration_ms: 96000 }] };
+    }
     if (/INSERT INTO radio_files/.test(text)) {
       state.fileInsert = { text, params };
       return { rows: [{ id: FILE, workspace_id: WS, owner_id: ME, kind: 'voice_note', r2_key: params[4], call_id: params[9] }] };
@@ -538,6 +545,21 @@ run('radio_call', async () => {
     });
     check('finalize: a non-participant cannot claim a call', r.status === 403, r.status);
     check('finalize: and nothing was inserted', state.fileInsert === undefined);
+  }
+  // The other half of that write: a call_id the feed never selects is a
+  // column that exists, is filled in correctly, is read correctly by both
+  // apps — and is invisible, so every recorded call arrives in the feed
+  // labelled "Voice memo". Assert the statement itself, because the handler
+  // above decides what the SQL returns and would happily answer a query that
+  // does not ask for the column.
+  {
+    const state = freshState();
+    h.setQueryHandler(handlerFor(state));
+    const r = await h.request('GET', `/radio/workspaces/${WS}/files?limit=5`, { ...auth(ME) });
+    check('feed: 200', r.status === 200, r.status);
+    check('feed: the query asks for the call a recording came from',
+      /f\.call_id/.test(state.feedQuery?.text || ''), state.feedQuery?.text);
+    check('feed: and it reaches the client', r.json?.[0]?.call_id === CALL, r.json?.[0]);
   }
 
   // ── 12. Flagging it for Offhand ──────────────────────────────────────────
