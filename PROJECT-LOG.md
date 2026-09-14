@@ -431,3 +431,231 @@ person reads before approving the connector. A privacy promise that the code
 has stopped keeping is worse than one that was never made, so it now says
 what is true: the connector reads a transcript where one exists and never the
 audio.
+
+---
+
+## 9 — Calls, and a recording that reaches backwards
+
+The ask was live voice and video where **each device records both sides of the
+call locally and keeps it only on demand**, with what is kept landing in
+Offhand as a transcript. The alternative — each person records only their own
+microphone and the server stitches the two — was offered and explicitly
+overruled, so it is recorded here rather than re-litigated.
+
+**Neither operating system will allow it from outside an RTC pipeline.**
+Android's `AudioPlaybackCapture` reaches only `USAGE_UNKNOWN`/`GAME`/`MEDIA`
+players and WebRTC plays as `USAGE_VOICE_COMMUNICATION`, which Android
+documents as not capturable; iOS has no playback-capture API at all and WebRTC
+owns the voice-processing audio unit. `flutter_webrtc`'s own recorder attaches
+exactly one audio interceptor — mic **or** far end, never both. So the mix has
+to be taken inside an SDK that already holds the decoded remote audio, and of
+the maintained Flutter RTC SDKs only Agora exposes that, as a single documented
+call. **That one API is the reason for the vendor choice**, which is why the
+whole RTC surface is behind `RadioCall` in the app: the blast radius of
+changing vendor is one file.
+
+**The recording format is ADTS `.aac` because of crashes, not compression.** A
+WAV header is finalised on stop, so a force-kill yields an unplayable file —
+which would break the single guarantee the keep marker exists to provide. A
+truncated ADTS stream is playable frame by frame, so a tap is never lost.
+
+**The rename is the consent marker.** Tapping Upload renames the buffer file
+synchronously, before any network call; Agora keeps writing to the same inode
+under the new name. There is therefore no window in which somebody has tapped
+and the bytes are not marked, and no separate flag to fall out of sync with
+the file. Everything after the rename — telling this server, telling the far
+end — can fail without losing a recording somebody chose to keep.
+
+**Provenance is a column, not a kind.** A fourth value in `radio_file_kind`
+would have fallen straight out of `radio_transcribe.claim()`'s
+`AND kind = 'voice_note'` filter and forced a decision at every kind-switched
+branch in the route layer. `radio_files.call_id` gives the feed its phone glyph
+while the row stays, to every existing code path — including the transcription
+pipeline landing in §8 — exactly the voice note it is. The only change on that
+whole path is one clause accepting `audio/aac` in `upload-url`; without it an
+ADTS file lands under an `.m4a` key with an `audio/mp4` Content-Type and will
+not play back on iOS.
+
+**Consent is a product behaviour, not a dialog.** A fixed, non-dismissible
+strip states the model before the first second of audio, identically on every
+participant's screen, so neither party is in a different informational
+position. The button's sub-label says the tap reaches backwards *before* it is
+tapped, because the surprising part is not that a recording exists but that it
+reaches back — somebody who learns that at minute ten can still act on it, and
+somebody who learns it afterwards cannot. The notice names the person, because
+in a two-party call anonymity fools nobody: there is exactly one other person
+and one of you did not tap. It goes out over three paths (the peer data
+stream, an FCM push from here, and the next read of the call) because a design
+resting on the far end finding out must not rest on one transport.
+
+**`kept_at` is never cleared.** An un-keep writes `kept = false` and leaves the
+stamp standing: "Alex kept this, then stopped" is what happened, and a column
+that erases itself cannot say it. That is the row to show the day somebody
+disputes it, and the test asserts the `CASE` clause as SQL text as well as
+behaviour — the harness stubs `pool.query`, so a stub, not Postgres, decides
+what a `WHERE` matches, and deleting the clause would otherwise leave every
+behavioural check green.
+
+**`radio_never_record` is enforced from the server, on both clients.** If any
+participant has it set, neither phone records. A device-local setting would
+have been a switch that only stops your own phone, which is not what the words
+promise. The settings copy states the limit plainly rather than implying more:
+it cannot stop somebody recording another way.
+
+**A video call records audio only, deliberately.** No client SDK muxes local
+camera, remote video and mixed audio into one local file. Getting the picture
+would mean server-side composited recording, which moves both participants'
+video to a vendor on *every* call in case somebody later taps — a large cost
+and a real consent regression, bought for something Offhand cannot use, since
+a transcript of a video call is identical to a transcript of a voice call. The
+button says "Audio only" so nobody believes they captured the whiteboard.
+
+**The ring is two roads, not one.** An FCM alert always works and degrades to
+a missed-call notification. A PushKit push is the only message iOS will wake a
+terminated app for, and it is what makes a locked iPhone ring — Firebase
+cannot send one, so `services/apns_voip.js` posts to Apple directly. PushKit
+tokens live in `device_tokens` as their own platform and every FCM send
+excludes them by that platform: sending one to FCM would fail every time, and
+the invalid-token pruning would then delete the very token that makes the
+phone ring.
+
+**Nothing here has run on a phone.** The JavaScript is tested and the Dart
+analyzes clean, and the Swift and Kotlin have never been compiled. The risk is
+concentrated in one unverified behaviour — Agora's mixed recording on iOS —
+whose failure mode is one voice silently missing. `CALLING.md` says so in its
+own section rather than burying it, and the first thing to do is two real
+phones and a release build.
+
+---
+
+## 10 — A kept call is pushed into Offhand, and the trust runs the other way
+
+§9 built the recording and stopped at the edge of this server: a kept call
+became an ordinary Radio voice note with a `call_id` on it, and how it reached
+Offhand was left as "Offhand's assistant will find it through the connector".
+That was the wrong ending. A recording somebody chose to keep would have
+arrived in Offhand whenever they next happened to ask their assistant a
+question about it — which is not a feature anybody can describe, and is
+indistinguishable, for days at a time, from the recording being lost.
+
+**So this API pushes, and Offhand transcribes.** As soon as the kept call's row
+is inserted, `services/offhand_push` sends the audio into the keeper's own
+Offhand account, where it lands as a note and AssemblyAI makes the transcript.
+Pull was considered and rejected for the reason above. Giving this server its
+own AssemblyAI provider was rejected too: Offhand already has one, with
+diarization, and a second copy here would be a second bill, a second prompt to
+keep in step, and two transcripts of one recording that can disagree. The
+transcript that matters is the one in the note.
+
+**The direction of trust reverses, and it does so on the same key.** Everything
+in §6 and §7 runs inbound: Offhand vouches for a phone, this server believes it
+under `OFFHAND_PARTNER_KEY`, and the account holder can refuse with
+`partner_link_enabled`. This server was a reader that never reached out. Now it
+is a client of Offhand's — and the credential it presents is not a new one. It
+is the same shared secret, stored here as `OFFHAND_PARTNER_KEY` and on Offhand
+as `GROUNDERS_PARTNER_KEY`, which is the name its capture routes check. `§6`
+said the one trust decision "lives in this file and nowhere else", meaning
+`routes/partner.js`. That stopped being true the day this shipped, in both
+repositories at once.
+
+A second key was the obvious alternative and was not taken, because the value
+is already shared by construction — the two servers have always had to hold the
+identical string — and a second secret would mean a second rotation, a second
+way to be half-configured, and a silent failure mode on every deploy that set
+one and not the other. What it costs instead is that **the same lock now opens
+a second door**: a leak used to mean "someone can read a Grounders feed as
+Offhand" and now also means "someone can write notes into Offhand accounts,
+put audio in their storage, and spend their allowance". That is written down
+here, in Offhand's `routes/partner.js`, and in both `.env.example` files,
+because a change in what a key is worth is exactly the thing nobody remembers
+having made. Rotating it is now a two-repository operation.
+
+For the same reason the push reads `GROUNDERS_PARTNER_KEY` and falls back to
+`OFFHAND_PARTNER_KEY` rather than demanding a new variable: a deploy that
+already has the link working holds the value under the second name, and this
+job is inert without a key — so requiring a rename would have made the common
+upgrade fail by doing nothing at all, with no status on any row to explain it.
+
+The blast radius of that key being stolen is bounded on the other side rather
+than promised on this one, which is the only kind of bound worth having.
+**Offhand mints the object key**, from the user it resolves the phone to, in
+that user's own `audio/<userId>/` prefix; this side never names a key, so the
+key cannot be used to write anywhere else in Offhand's bucket. **Offhand
+resolves the account against `grounders_links`**, the row that records that
+this person connected the two apps and which they can break from Settings —
+not against its user table, and never by creating an account. And the capture
+is idempotent on `radio-call:<call_id>`, so a replayed request is the same
+note.
+
+**The audio moves by presigned PUT, then a small JSON call.** Posting the bytes
+to Offhand as a request body dies on its own `express.json` 2 MB limit against
+a recording that is tens of megabytes, and would hold one call in two
+processes' memory at once. Handing Offhand a URL to fetch would be server-side
+request forgery with extra steps — `services/article.js` exists because this
+codebase learned that once — and would make the partner key a way to point
+Offhand's server at anything. So: Offhand presigns into its own namespace, this
+side PUTs the bytes straight at R2, and one JSON call says "that key is a note
+now". The `Content-Type` on the PUT has to be exactly what the presign signed,
+or R2 answers 403 in a way that reads like a permissions problem and is not.
+
+**The push is durable because nothing else can retry it.** The phone deletes
+its local recording the instant its own R2 upload returns, so from then on R2
+holds the only copy and the phone is out of the story. A background call that
+logged a warning on failure would therefore be a call somebody was *told* was
+kept, and which silently never arrived anywhere. `offhand_push_status` and
+`offhand_push_claimed_at` are the same devices §8 introduced for transcripts,
+for the same reason — `'pending'` is written by one process and cleared by the
+same one, and a deploy or a crash in between leaves a row nothing will clear —
+but the sweeper does more here than there. Transcription's turns an abandoned
+claim into `'failed'` and waits for somebody to press a retry button; there is
+no button here, so `sweepStalePushes` **re-runs** the push, ten at a time and
+sequentially, because each one holds a whole recording in memory and a sweep
+that started two hundred at once would kill the process that was rescuing them.
+
+**A refusal is classified by name, not by number, and the retries end.** The
+shared error vocabulary is the contract: `no_account`, `link_disabled` and
+`invalid_phone` mean there is nobody to deliver to (`'unmapped'` — its own
+terminal state, and not a kind of failure, because a row that says `'failed'`
+invites somebody to build a retry for something retrying cannot fix);
+`unauthorized`, `allowance` and a 413 mean it was refused and will be refused
+again (`'failed'`); a 5xx, a timeout or a dropped socket leaves the row
+`'pending'` for the sweep. `503 partner_unconfigured` is deliberately in the
+last group even though it is a flat refusal: it means the other end has not
+been given its key yet, which is one deploy from being fixed, and giving up on
+it would lose every call kept during a window somebody was already closing.
+The retrying stops after a day — bounded by wall clock off `created_at`, which
+is the first attempt to within a second because `recordFile` queues the push at
+insert. That is a deliberate substitute for an attempts column: with an hourly
+sweep it is about two dozen tries, and it costs no fourth column. If a push is
+ever queued from anywhere but the insert, that reasoning stops holding.
+
+**`offhand_requested_at` changed meaning, which is why two files had to be
+rewritten rather than just extended.** It used to mean "the user asked for this
+one", and it was how a kept call reached Offhand at all. Now the ordinary path
+needs no flag, and what a stamp marks is the exception: every terminal outcome
+above sets it, so a recording the push could not deliver is put in front of the
+user's own assistant through the MCP connector instead. Failing loudly into
+their assistant is the fallback; failing quietly is not one. The manual flag
+still writes the same column — two columns both meaning "put this first" would
+have to be ORed by every reader forever — so the sentence the connector says
+about flagged rows (`FLAGGED_NOTE` in `src/mcp/tools.js`) can no longer claim
+the user asked for them. Telling an assistant somebody asked, when nobody did,
+invites it to answer a question that was never put.
+
+**The push is not synchronous inside `POST /radio/workspaces/:id/files`, and
+must not become so.** A 500 there makes the phone retry the whole upload, and
+the retry mints a *fresh* key — so the same audio would land as a second R2
+object and a second `radio_files` row, with the first orphaned. The finalize
+call answers 201 as soon as the row exists; the delivery is the row's problem
+from then on, which is exactly what the claim and the sweep are for.
+
+**A phone number now goes outbound, and the README had to say so.** The digits
+are the only identifier the two systems share — it is the whole basis of the
+link in §6, in the other direction — so the keeper's own number is what
+resolves the Offhand account. It is theirs, it goes to one configured host
+under a shared key, and it never touches the connector: the other people on the
+call travel as display names in `attendees`, which is what a summary needs to
+say who said what and is not an identifier for anything. The connector's "no
+phone numbers" promise was about what an assistant can read and is still true;
+leaving it standing unqualified next to a server that now sends one would have
+been true by wording and false by impression.

@@ -35,6 +35,7 @@ Never:          the audio itself, phone numbers, anything written
 | "What did Dana and I decide about Friday?" | `radio_messages` with `with: "Dana"` |
 | "Find the PDF Jordan shared" | `search` then `fetch message:…` |
 | "What did Dana's voice note say?" | `radio_messages` — a transcribed note reads like any other |
+| "Summarise the call I sent you" | `radio_messages` — a flagged call comes back first, under `for_offhand` (a kept call normally arrives in Offhand as a note of its own; this is the road it takes when that push could not be delivered) |
 | "How much have I posted?" | `me` |
 
 Seven read tools, offered to every client:
@@ -47,7 +48,7 @@ Seven read tools, offered to every client:
 | `friends` | Friends with activity signals, plus pending requests both ways |
 | `me` | Own account summary, no contact details |
 | `radio_workspaces` | Conversations you are in: members, unread, counts by kind |
-| `radio_messages` | One conversation in order, text in full, transcribed voice notes with their transcript, files with links |
+| `radio_messages` | One conversation in order, text in full, transcribed voice notes with their transcript, files with links. A kept call carries `from_call: true` and a note that more than one person is speaking and the transcript does not say who; a flagged message carries `for_offhand: true` and is repeated at the top of the result — flagged either by the user, or by a kept call whose push into Offhand could not be delivered (see [CALLING.md](CALLING.md)) |
 
 `search` and `fetch` are named and shaped to match ChatGPT's knowledge-base
 connector contract, which requires exactly those two. Claude and Gemini do

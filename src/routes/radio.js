@@ -685,6 +685,13 @@ router.post('/workspaces/:id/upload-url', async (req, res, next) => {
       if (clientMime === 'audio/webm') { mime = 'audio/webm'; ext = 'webm'; }
       else if (clientMime === 'audio/ogg') { mime = 'audio/ogg'; ext = 'ogg'; }
       else if (clientMime === 'audio/wav') { mime = 'audio/wav'; ext = 'wav'; }
+      // A kept call. Agora writes ADTS AAC, which is a different container
+      // from the m4a a memo records into — and the reason for it is that a
+      // truncated ADTS stream is still playable frame by frame, so a call
+      // whose app was killed mid-recording survives. Without this clause the
+      // file would land under an .m4a key with an audio/mp4 Content-Type and
+      // fail to play back on iOS.
+      else if (clientMime === 'audio/aac') { mime = 'audio/aac'; ext = 'aac'; }
       else { mime = VOICE_MIME; ext = VOICE_EXT; }
     } else {
       mime = (req.body.mime_type || 'application/octet-stream').toString();
@@ -716,12 +723,28 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
     const wsId = req.params.id;
     if (!(await isMember(wsId, myId))) return res.status(403).json({ error: 'Not a member' });
 
-    const { kind, r2_key, mime_type, filename, duration_ms } = req.body;
+    const { kind, r2_key, mime_type, filename, duration_ms, call_id } = req.body;
     const sizeBytes = parseInt(req.body.size_bytes);
     if (!ALLOWED_KINDS.includes(kind)) return res.status(400).json({ error: 'kind must be voice_note or file' });
     if (!r2_key || typeof r2_key !== 'string') return res.status(400).json({ error: 'r2_key required' });
     if (!Number.isFinite(sizeBytes) || sizeBytes < 0) return res.status(400).json({ error: 'size_bytes must be a non-negative integer' });
     if (!r2_key.startsWith(`radio/${wsId}/`)) return res.status(400).json({ error: 'r2_key does not match workspace' });
+
+    // A kept call names the call it came from. Only a participant may make
+    // that claim: the column drives the feed's "Call with Sam · 14 min" and
+    // is provenance, so a client must not be able to stamp someone else's
+    // call onto a file it uploaded.
+    let callId = null;
+    if (call_id) {
+      const { rows } = await pool.query(
+        `SELECT 1 FROM radio_call_participants p
+           JOIN radio_calls c ON c.id = p.call_id
+          WHERE p.call_id = $1 AND p.user_id = $2 AND c.workspace_id = $3`,
+        [call_id.toString(), myId, wsId],
+      );
+      if (!rows.length) return res.status(403).json({ error: 'Not a participant of that call' });
+      callId = call_id.toString();
+    }
 
     // The row, the storage charge and the push all live in radio_send, which
     // the MCP connector's send tools call too.
@@ -734,7 +757,17 @@ router.post('/workspaces/:id/files', async (req, res, next) => {
       filename: filename || null,
       sizeBytes,
       durationMs: parseInt(duration_ms),
+      callId,
     });
+
+    // The participant's own row points at the file it produced, so the call's
+    // paperwork and the recording it yielded are one lookup apart.
+    if (callId && row?.id) {
+      pool.query(
+        `UPDATE radio_call_participants SET file_id = $3 WHERE call_id = $1 AND user_id = $2`,
+        [callId, myId, row.id],
+      ).catch(() => {});
+    }
 
     res.status(201).json(row);
   } catch (err) { next(err); }
@@ -892,6 +925,41 @@ router.post('/files/:id/transcribe', async (req, res, next) => {
       started,
       ...(started ? {} : { reason }),
     });
+  } catch (err) { next(err); }
+});
+
+// POST /radio/files/:id/offhand { requested? } — flag a message for Offhand.
+//
+// One column and no new pipeline. Offhand already reads this workspace
+// through the MCP connector it holds; the flag is what makes a kept call
+// arrive as a request rather than as one more item in a feed, and the
+// connector's radio_messages tool surfaces flagged rows first. Clearing it is
+// the same route with { requested: false }, because a flag that cannot be
+// taken back is a flag people stop setting.
+router.post('/files/:id/offhand', async (req, res, next) => {
+  try {
+    const myId = req.user.id;
+    const fileId = req.params.id;
+
+    const { rows: [f] } = await pool.query(
+      `SELECT id, workspace_id FROM radio_files WHERE id = $1`,
+      [fileId]
+    );
+    if (!f) return res.status(404).json({ error: 'File not found' });
+    if (!(await isMember(f.workspace_id, myId))) {
+      return res.status(403).json({ error: 'Not a member' });
+    }
+
+    const requested = req.body.requested !== false;
+    const { rows: [after] } = await pool.query(
+      `UPDATE radio_files
+          SET offhand_requested_at = CASE WHEN $2 THEN COALESCE(offhand_requested_at, NOW()) ELSE NULL END
+        WHERE id = $1
+        RETURNING id, offhand_requested_at`,
+      [fileId, requested]
+    );
+
+    res.json({ id: fileId, offhand_requested_at: after?.offhand_requested_at ?? null });
   } catch (err) { next(err); }
 });
 

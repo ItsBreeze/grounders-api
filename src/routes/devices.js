@@ -12,7 +12,12 @@ const { requireAuth } = require('../middleware/auth');
 
 router.use(requireAuth);
 
-const VALID_PLATFORMS = ['ios', 'android', 'web'];
+// 'ios_voip' is a PushKit token, not an FCM one: it is minted by iOS for
+// VoIP pushes, it goes to APNs directly (Firebase does not send VoIP pushes),
+// and it is what makes a locked iPhone actually ring. It lives in the same
+// table because it is a device token with the same lifecycle, and every FCM
+// send filters it out by platform — see services/notifications.js.
+const VALID_PLATFORMS = ['ios', 'android', 'web', 'ios_voip'];
 // Which client registered the token. Older builds send nothing and are
 // treated as the main Grounders app.
 const VALID_APPS = ['grounders', 'radio'];
@@ -26,7 +31,7 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: 'token is required (string, 20–4096 chars)' });
     }
     if (!VALID_PLATFORMS.includes(platform)) {
-      return res.status(400).json({ error: 'platform must be ios, android, or web' });
+      return res.status(400).json({ error: 'platform must be ios, android, web or ios_voip' });
     }
 
     await pool.query(

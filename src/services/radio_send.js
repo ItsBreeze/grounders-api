@@ -18,6 +18,7 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/cl
 const pool = require('../db/pool');
 const notifications = require('./notifications');
 const radioTranscribe = require('./radio_transcribe');
+const offhandPush = require('./offhand_push');
 
 // A file sent through the connector is downloaded into memory first, so this
 // is a memory cap as much as a policy one.
@@ -112,7 +113,7 @@ async function sendText({ userId, workspaceId, content }) {
  * its public URL. The caller has already established membership and that
  * r2Key belongs to this workspace.
  */
-async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename, sizeBytes, durationMs }) {
+async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename, sizeBytes, durationMs, callId }) {
   const size = Number.isFinite(sizeBytes) ? Math.round(sizeBytes) : 0;
   // A duration is a positive number of milliseconds or it is not a duration.
   // This number is client-supplied and the route does not range-check it, and
@@ -123,11 +124,16 @@ async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename
   // in "free". NULL is "unknown".
   const rounded = Number.isFinite(durationMs) ? Math.round(durationMs) : null;
   const duration = rounded !== null && rounded > 0 ? rounded : null;
+  // call_id is provenance, not a kind: a kept call is an ordinary voice note
+  // to every code path that touches it — including the transcription
+  // pipeline below — and the column only tells the feed to draw a phone
+  // glyph instead of a microphone. The route has already established that
+  // this user was on that call.
   const { rows: [row] } = await pool.query(
     `WITH ins AS (
        INSERT INTO radio_files
-         (id, workspace_id, owner_id, kind, r2_key, mime_type, filename, size_bytes, duration_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (id, workspace_id, owner_id, kind, r2_key, mime_type, filename, size_bytes, duration_ms, call_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *
      ), bump AS (
        UPDATE users SET radio_storage_used_bytes = radio_storage_used_bytes + $8 WHERE id = $3
@@ -135,7 +141,7 @@ async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename
      SELECT * FROM ins`,
     [
       uuid(), workspaceId, userId, kind, r2Key,
-      mimeType || null, filename || null, size, duration,
+      mimeType || null, filename || null, size, duration, callId || null,
     ],
   );
 
@@ -144,6 +150,22 @@ async function recordFile({ userId, workspaceId, kind, r2Key, mimeType, filename
   // leaves this send exactly as it would have been. With no provider key
   // configured it does nothing at all and transcript_status stays NULL.
   if (kind === 'voice_note' && row?.id) radioTranscribe.queue(row.id);
+
+  // A kept call goes to Offhand, where it becomes a note. Call-only by
+  // construction rather than by a flag: `callId` is set by exactly one caller,
+  // POST /radio/workspaces/:id/files with a call the uploader was verified to
+  // be on, so a voice memo and a connector upload cannot reach this line at
+  // all — which is the guarantee that matters, because this is the one path
+  // that sends somebody's audio to another service.
+  //
+  // Queued, never awaited, and deliberately not done inside the route. A push
+  // that failed synchronously would 500 the finalize call, the phone would
+  // retry the whole upload, and the retry mints a FRESH r2_key — so the same
+  // recording would land as a second R2 object and a second radio_files row,
+  // with the first one orphaned. Dropping the promise is safe here in a way it
+  // usually is not: the row carries the claim, so a process that dies mid-push
+  // leaves something the hourly sweep finds and finishes.
+  if (callId && row?.id) offhandPush.queue(row.id);
 
   notifications.fireAndForget((async () => {
     const to = await recipients(workspaceId, userId);

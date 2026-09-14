@@ -22,6 +22,18 @@ for (const key of [
   'FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY',
   'RESEND_API_KEY', 'APP_REVIEW_PHONE', 'APP_REVIEW_OTP',
   'DEEPGRAM_API_KEY',
+  // Not a paid call — token minting is local crypto — but a developer's real
+  // project id leaking into a suite would make "calling is not configured"
+  // untestable on their machine and testable on everyone else's. The calling
+  // suite sets these itself, per phase.
+  'AGORA_APP_ID', 'AGORA_APP_CERTIFICATE',
+  // The push of a kept call to Offhand, which is the one path in the repo that
+  // sends a user's audio to another service. A developer with these in their
+  // own .env would otherwise have any suite that finalizes a file with a
+  // call_id quietly POST a harness recording into the real Offhand, under a
+  // real partner key, against whatever account that phone number resolves to.
+  // The push suite sets them itself, per phase.
+  'OFFHAND_BASE_URL', 'GROUNDERS_PARTNER_KEY',
 ]) process.env[key] = '';
 
 const verbose = process.env.VERBOSE === '1';

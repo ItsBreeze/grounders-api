@@ -12,11 +12,14 @@
     "test:mcp": "node test/mcp.test.js",
     "test:partner": "node test/partner.test.js",
     "test:radio_send": "node test/radio_send.test.js",
-    "test:radio_transcribe": "node test/radio_transcribe.test.js"
+    "test:radio_transcribe": "node test/radio_transcribe.test.js",
+    "test:radio_call": "node test/radio_call.test.js",
+    "test:offhand_push": "node test/offhand_push.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "agora-token": "^2.0.6",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

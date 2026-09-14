@@ -45,13 +45,15 @@ router.get('/me', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /users/me — display_name and the partner-link switch. Both fields are
-// optional on their own and what is absent is left as it was; a body with
-// neither is the 400 it always was.
+// PATCH /users/me — display_name, the partner-link switch, and the calling
+// opt-out. Every field is optional on its own and what is absent is left as
+// it was; a body with none of them is the 400 it always was.
 router.patch('/me', async (req, res, next) => {
   try {
-    const { display_name, partner_link_enabled } = req.body || {};
-    if (display_name === undefined && partner_link_enabled === undefined) {
+    const { display_name, partner_link_enabled, radio_never_record } = req.body || {};
+    if (display_name === undefined
+      && partner_link_enabled === undefined
+      && radio_never_record === undefined) {
       return res.status(400).json({ error: 'display_name is required' });
     }
 
@@ -72,6 +74,18 @@ router.patch('/me', async (req, res, next) => {
       }
       params.push(partner_link_enabled);
       sets.push(`partner_link_enabled = $${params.length}`);
+    }
+    if (radio_never_record !== undefined) {
+      // The same strictness, for the same reason, and it matters more here:
+      // a "false" string read as true would silently switch someone's calls
+      // back on. Both clients enforce this flag from the token response, so
+      // the value written here is the one that decides whether anybody on a
+      // call records at all.
+      if (typeof radio_never_record !== 'boolean') {
+        return res.status(400).json({ error: 'radio_never_record must be a boolean' });
+      }
+      params.push(radio_never_record);
+      sets.push(`radio_never_record = $${params.length}`);
     }
 
     params.push(req.user.id);
@@ -221,6 +235,10 @@ function sanitizeSelf(u) {
     // migrated database; the coercion only covers a row read by a server
     // whose migration has not run yet, where absent means "not refused".
     partner_link_enabled: u.partner_link_enabled !== false,
+    // NOT NULL DEFAULT false, so the coercion only covers a row read before
+    // the migration lands — where absent means "has not opted out", which is
+    // the same answer the column gives.
+    radio_never_record: u.radio_never_record === true,
   };
 }
 

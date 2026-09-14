@@ -427,6 +427,153 @@ CREATE INDEX IF NOT EXISTS idx_radio_files_transcript_spend
   WHERE transcript_claimed_at IS NOT NULL;
 
 
+-- ─── Radio calls ───────────────────────────────────────────────────────────
+-- A live call between two members of a workspace. Both phones record the
+-- mixed audio locally from the moment they join; nothing leaves either device
+-- unless someone taps Upload to Offhand, at which point that person's own
+-- recording is uploaded as an ordinary voice note. The server never holds
+-- call audio and never brokers media — Agora carries that — so these tables
+-- are the call's paperwork and nothing else: who rang whom, who answered,
+-- and who was told that a recording was being kept.
+CREATE TABLE IF NOT EXISTS radio_calls (
+  id            UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+  workspace_id  UUID        NOT NULL REFERENCES radio_workspaces(id) ON DELETE CASCADE,
+  started_by    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  callee_id     UUID        REFERENCES users(id) ON DELETE CASCADE,
+  media         TEXT        NOT NULL DEFAULT 'audio',
+  channel       TEXT        NOT NULL,
+  state         TEXT        NOT NULL DEFAULT 'ringing',
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  answered_at   TIMESTAMPTZ,
+  ended_at      TIMESTAMPTZ
+);
+
+-- The ringing poll (GET /radio/calls/:id) is by primary key, so the only
+-- index worth having is the one the end-sweep scans: calls left 'active' or
+-- 'ringing' by an app that died before it could say so. Partial, so it holds
+-- only calls actually in flight — nearly always none.
+CREATE INDEX IF NOT EXISTS idx_radio_calls_open
+  ON radio_calls(started_at) WHERE state IN ('ringing', 'active');
+
+CREATE INDEX IF NOT EXISTS idx_radio_calls_workspace
+  ON radio_calls(workspace_id, started_at DESC);
+
+-- callee_id is NOT NULL in spirit for a 1:1 call and nullable in the column,
+-- because a group call has no single callee — the participant rows are the
+-- guest list. Phase 1 always writes one; nothing reads it as guaranteed.
+--
+-- kept_at is the durable record of who chose to keep the call and when, and
+-- it is the row you show the day someone disputes what happened. It is
+-- deliberately never cleared by an un-keep: a cancel writes kept = false and
+-- leaves kept_at standing, because "Alex kept this, then stopped" is the
+-- truth, and a column that erases itself cannot tell it.
+CREATE TABLE IF NOT EXISTS radio_call_participants (
+  call_id   UUID        NOT NULL REFERENCES radio_calls(id) ON DELETE CASCADE,
+  user_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  joined_at TIMESTAMPTZ,
+  left_at   TIMESTAMPTZ,
+  kept      BOOLEAN     NOT NULL DEFAULT false,
+  kept_at   TIMESTAMPTZ,
+  file_id   UUID        REFERENCES radio_files(id) ON DELETE SET NULL,
+  PRIMARY KEY (call_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_radio_call_participants_user
+  ON radio_call_participants(user_id);
+
+-- The per-account opt-out, returned on every token response. If ANY
+-- participant has it set, BOTH clients skip recording entirely — enforced
+-- from one server-supplied flag so it is not honour-system between peers.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS radio_never_record BOOLEAN NOT NULL DEFAULT false;
+
+-- Provenance without a new kind. A fourth value in radio_file_kind would fall
+-- straight out of radio_transcribe.claim()'s "AND kind = 'voice_note'" filter
+-- and force a decision at every kind-switched branch in the route layer. A
+-- nullable FK gives the feed its phone glyph and "Call with Sam · 14 min"
+-- while the row stays, to every existing code path, exactly the voice note it
+-- is — including the transcription pipeline, which needs no change at all.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS call_id UUID
+  REFERENCES radio_calls(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_radio_files_call
+  ON radio_files(call_id) WHERE call_id IS NOT NULL;
+
+-- Lets the MCP radio_messages tool surface a row first, so a kept call reaches
+-- Offhand ahead of the rest of a feed.
+--
+-- It no longer means what its name says. When this column was added, a kept
+-- call reached Offhand only by being read: somebody tapped the flag, and the
+-- connector's radio_messages tool put the flagged row at the top of whatever
+-- Offhand next asked for. Offhand now gets a kept call PUSHED to it instead
+-- (services/offhand_push), as a note of its own, seconds after the recording
+-- lands — so on the ordinary path nothing is flagged at all and nothing needs
+-- to be. What a stamp here marks now is the exception: the push could not
+-- deliver this recording — no Offhand account for the number, an allowance
+-- refusal, a link the user broke — so surface it to the connector instead,
+-- which is the only road left to it.
+--
+-- The manual flag still writes the same column, and that is deliberate rather
+-- than lazy: the reader wants exactly the same thing from both writers ("this
+-- row, first, please"), and two columns meaning "put this first" would have to
+-- be ORed by every reader forever. What changed is only who sets it, which is
+-- why anything that renders this must not say "you asked for this" — see
+-- FLAGGED_NOTE in src/mcp/tools.js.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS offhand_requested_at TIMESTAMPTZ;
+
+-- The push's own paperwork.
+--
+-- offhand_push_status is NULL when nothing has ever been attempted — which is
+-- every row that is not a kept call, and every row on a deploy that has no
+-- OFFHAND_BASE_URL or no partner key, because the push writes no status at all
+-- rather than marking work it never tried. Then 'pending' (claimed by a
+-- process that has promised to finish it or record why not) → 'pushed' |
+-- 'failed' | 'unmapped'.
+--
+-- 'unmapped' is its own terminal state and not a kind of failure: it means
+-- there is no Offhand account these bytes could belong to — the keeper's
+-- Grounders account has no phone number at all (users.phone is NULLABLE; the
+-- constraint is phone_or_email, so an email-only account is a legal account),
+-- or Offhand has no live grounders_links row for those digits. Nothing about
+-- retrying that changes the answer, and a row that says 'failed' invites
+-- somebody to build a retry for it.
+--
+-- offhand_push_claimed_at is the same device transcript_claimed_at is, for the
+-- same reason and with the same failure behind it: 'pending' is written by one
+-- process and cleared by the same one, and a deploy or a crash in between
+-- leaves a row nothing will ever clear. The claim therefore expires, and the
+-- hourly sweep re-drives what it finds — which matters more here than it does
+-- for a transcript, because the phone deletes its only copy of the recording
+-- the moment the R2 upload returns. Nothing else can re-drive this.
+--
+-- offhand_note_id is TEXT and is NOT a foreign key: it is another service's
+-- primary key, living in another database, and this column exists so that a
+-- support question ("where did my call go?") has an answer without a round
+-- trip. A uuid column would be a guess about how Offhand mints ids that costs
+-- something the day it stops being true.
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS offhand_push_status     TEXT;
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS offhand_push_claimed_at TIMESTAMPTZ;
+ALTER TABLE radio_files ADD COLUMN IF NOT EXISTS offhand_note_id         TEXT;
+
+-- The sweeper's scan: pushes still 'pending' past the staleness window. Partial
+-- for the same reason the transcript one is — it holds only rows with a push in
+-- flight, which is a handful at any moment and nearly always none — and without
+-- it an hourly cron sequentially scans every file row in the table forever.
+CREATE INDEX IF NOT EXISTS idx_radio_files_offhand_push_pending
+  ON radio_files(offhand_push_claimed_at) WHERE offhand_push_status = 'pending';
+
+-- The sweep's second arm: a kept call that was never claimed at all. claim()
+-- writes 'pending' from a fire-and-forget promise that starts after the row has
+-- already committed, so a deploy or a pool blip in that window leaves the row
+-- at NULL — and the phone has already deleted its only copy. Rows kept while
+-- this deploy had no OFFHAND_BASE_URL sit here too, which is what lets the
+-- sweep deliver them retroactively once it is configured. Partial on exactly
+-- the predicate the sweep asks for, so it stays tiny: an ordinary voice memo
+-- has no call_id and never enters it.
+CREATE INDEX IF NOT EXISTS idx_radio_files_offhand_push_unclaimed
+  ON radio_files(created_at)
+  WHERE offhand_push_status IS NULL AND call_id IS NOT NULL;
+
+
 -- ─── OAuth (for the MCP connector) ─────────────────────────────────────────
 -- Claude, ChatGPT and Gemini reach a user's Grounders + Radio through one MCP
 -- server (routes/mcp.js), and all three authenticate with OAuth 2.1. Claude

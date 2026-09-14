@@ -48,6 +48,12 @@ async function sendToUser(userId, payload) {
 // `app` picks which client's tokens to hit: 'grounders' (default), 'radio',
 // or null for every token the user has (friend requests show in both).
 //
+// PushKit tokens ('ios_voip') are excluded from every send here. They are not
+// FCM tokens and FCM cannot deliver to them — sending one would be a
+// guaranteed failure per push, and the invalid-token pruning below would then
+// delete the very token that makes a locked iPhone ring. They are delivered
+// to by services/apns_voip.js instead.
+//
 // Radio's Android build renders its own conversation-style notification
 // (sender avatar, per-workspace grouping) from a DATA-ONLY message; a
 // `notification` block would make Android show a second, generic one. So
@@ -64,7 +70,8 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
     ({ rows } = await pool.query(
       `SELECT token, platform FROM device_tokens
         WHERE user_id = ANY($1)
-          AND ($2::text IS NULL OR app = $2)`,
+          AND ($2::text IS NULL OR app = $2)
+          AND platform <> 'ios_voip'`,
       [userIds, app]
     ));
   } catch (err) {

@@ -44,8 +44,8 @@ Response: `{ "token": "eyJ...", "user": {...}, "is_new": true }`
 ### Users
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/users/me` | My profile with post_count, friend_count, total_distance_m, partner_link_enabled |
-| PATCH | `/users/me` | Update display_name and/or partner_link_enabled (whether Offhand may link this account — see [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) |
+| GET | `/users/me` | My profile with post_count, friend_count, total_distance_m, partner_link_enabled, radio_never_record |
+| PATCH | `/users/me` | Update display_name, partner_link_enabled (whether Offhand may link this account — see [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) and/or radio_never_record (the calling opt-out — see [CALLING.md](CALLING.md)) |
 | GET | `/users/:id` | Another user's profile (friends or friend-of-friend only) |
 
 ---
@@ -207,9 +207,16 @@ custom connector in Claude, ChatGPT or Gemini, signs in once with their phone
 number, and their assistant can then read their Grounders posts (including the
 photos), friends, and Radio messages and files mid-conversation. Read-only; a
 voice note reaches it as its transcript where one has been made, never as
-audio; no phone numbers. Both apps share this API, so one connector
-covers both — built to the same shape as Offhand's, so the two sit side by
-side in an assistant's connector list.
+audio; no phone numbers reach the assistant. Both apps share this API, so one
+connector covers both — built to the same shape as Offhand's, so the two sit
+side by side in an assistant's connector list.
+
+That last promise is about what an assistant can read, and it is worth being
+exact now that something else is true beside it: when somebody keeps a Radio
+call, this API sends **that person's own phone number** outbound to Offhand, to
+find the account the recording belongs to (see [CALLING.md](CALLING.md)). It
+goes to one configured host, under a shared key, and never through the
+connector or into an assistant's context.
 
 It adds three OAuth tables and two optional env vars (`PUBLIC_BASE_URL`, and
 `OFFHAND_PARTNER_KEY` for Offhand's built-in link, which issues the same
@@ -219,3 +226,35 @@ mounted at the root ahead of everything else that lives there.
 Its documentation lives in **[MCP-CONNECTOR.md](MCP-CONNECTOR.md)** — the
 tools, what they apply, auth, the Offhand link, configuration and tests
 (`npm run test:mcp`, `npm run test:partner`).
+
+---
+
+## Radio Calls
+
+`/radio/calls` is live voice and video between members of a Radio
+conversation. Agora carries the live media; this API never sees a byte of a
+call while it is happening. What it does is mint the token that lets a phone
+join a channel, ring the other phone, and keep the record of who was told that
+a recording was being kept.
+
+Both phones record every call from the moment they connect, and nothing leaves
+either device unless somebody taps Upload to Offhand — at which point that
+person's own recording is uploaded as an ordinary Radio voice note, the
+transcription pipeline picks it up unchanged, and the API pushes the audio on
+into that person's own Offhand account, where it becomes a note. So of a call
+nobody keeps this server still holds nothing; of a call somebody keeps it holds
+the bytes twice, on the way in and on the way back out.
+
+It adds two tables, six columns, and five optional env var groups. With
+`AGORA_APP_ID` and `AGORA_APP_CERTIFICATE` unset the whole feature is inert and
+every other route behaves exactly as it did before it existed; with
+`OFFHAND_BASE_URL` unset a kept call is recorded but pushed nowhere, and
+nothing about the push is written to the row (the key it sends is the partner
+key this API already holds). No
+websocket, no second process, no change to the deploy.
+
+Its documentation lives in **[CALLING.md](CALLING.md)** — why the recording
+works the way it does, the consent design, the schema, where a kept call goes
+and what happens when it cannot get there, the routes, configuration, cost,
+what has NOT been verified on a device, and tests
+(`npm run test:radio_call`, `npm run test:offhand_push`).

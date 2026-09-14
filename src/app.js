@@ -16,6 +16,7 @@ const deviceRoutes   = require('./routes/devices');
 const blockRoutes    = require('./routes/blocks');
 const reportRoutes   = require('./routes/reports');
 const radioRoutes    = require('./routes/radio');
+const radioCallRoutes = require('./routes/radio_call');
 const inviteRoutes   = require('./routes/invites');
 const mcpOauthRoutes = require('./routes/mcp_oauth');
 const mcpRoutes      = require('./routes/mcp');
@@ -87,6 +88,10 @@ app.use('/friends',                  friendRoutes);
 app.use('/zones',                    zoneRoutes);
 app.use('/upload-url',               uploadRoutes);
 app.use('/devices',                  deviceRoutes);
+// Calls mount ABOVE /radio so /radio/calls/:id reaches this router rather
+// than falling through radio.js, which has no such path but does own the
+// prefix.
+app.use('/radio/calls',              radioCallRoutes);
 app.use('/radio',                    radioRoutes);
 app.use('/invites',                  inviteRoutes);
 

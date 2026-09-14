@@ -491,6 +491,40 @@ const VOICE_NOTE_NOTES = {
 };
 const NO_AUDIO = 'The audio itself is not available to an assistant; say so rather than guessing at the contents.';
 
+/**
+ * Said on a voice note that came from a live call rather than from one person
+ * talking into a phone. It matters to how the words should be read: there are
+ * at least two voices in it, the recording was mixed on one participant's
+ * device, and the speakers are not labelled.
+ */
+const CALL_NOTE =
+  'This is a recording of a live call, not a voice memo: more than one person '
+  + 'is speaking and the transcript does not say who. Attribute a line to '
+  + 'someone only where the words themselves make it obvious.';
+
+/**
+ * Said once when a message is flagged for Offhand.
+ *
+ * Two things write that flag now, and the sentence has to be true of both. A
+ * person can still ask for a message by hand (POST /radio/files/:id/offhand).
+ * And a kept call that could not be delivered into Offhand as a note —
+ * services/offhand_push pushes one the moment it is recorded — is flagged on
+ * its way past, so that a recording somebody chose to keep reaches them
+ * through this connector rather than not at all. So it can no longer say "the
+ * user asked for these": on the second path nobody asked, and telling an
+ * assistant that somebody did is inviting it to answer a question that was
+ * never put.
+ *
+ * What both cases share is the only thing the assistant needs from this: these
+ * rows were singled out for it rather than scrolled past, which is why they
+ * are repeated in full rather than only marked.
+ */
+const FLAGGED_NOTE =
+  'These were singled out for you to work from — either the user flagged them, '
+  + 'or a kept call could not be delivered into Offhand as a note and was '
+  + 'flagged here instead. They are repeated below in their place in the '
+  + 'conversation.';
+
 /** Said once per result that carries any transcript, not once per message. */
 const TRANSCRIPT_CAVEAT =
   'Transcripts are made by a machine from the audio: quote them as a transcript '
@@ -510,6 +544,19 @@ function formatMessage(r) {
   if (r.kind === 'voice_note') {
     const status = r.transcript_status || 'none';
     const out = { ...base, duration_ms: r.duration_ms || null, transcript_status: status };
+    // A kept call is an ordinary voice note in every other respect — same
+    // kind, same transcription pipeline — and this is the one thing that
+    // separates it: it is a recording of a live conversation, with more than
+    // one voice in it, rather than something one person spoke into a phone.
+    // Worth saying, because it changes how a transcript should be read.
+    if (r.call_id) {
+      out.from_call = true;
+      out.note_about_call = CALL_NOTE;
+    }
+    if (r.offhand_requested_at) {
+      out.for_offhand = true;
+      out.flagged_at = r.offhand_requested_at;
+    }
     if (status === 'ready' && r.transcript) out.transcript = r.transcript;
     else out.note = `${VOICE_NOTE_NOTES[status] || VOICE_NOTE_NOTES.none} ${NO_AUDIO}`;
     return out;
@@ -887,7 +934,7 @@ async function workspaceMessages(wsId, { since, until, like, limit, includeVoice
   const { rows } = await pool.query(
     `SELECT f.id, f.workspace_id, f.kind, f.owner_id, f.r2_key, f.mime_type, f.filename,
             f.size_bytes, f.duration_ms, f.text_content, f.transcript, f.transcript_status,
-            f.created_at, u.display_name AS owner_name
+            f.created_at, f.call_id, f.offhand_requested_at, u.display_name AS owner_name
        FROM radio_files f JOIN users u ON u.id = f.owner_id
       WHERE ${conditions.join(' AND ')}
       ORDER BY f.created_at DESC
@@ -942,12 +989,20 @@ async function radioMessages(myId, args) {
   }
 
   const messages = rows.reverse().map(formatMessage);
+  // Flagged messages are repeated at the top rather than sorted to the top.
+  // Someone asked for these specifically, and burying a request in a
+  // chronological feed is how it gets missed — but re-ordering the feed
+  // itself would break the one thing a conversation has to be, which is in
+  // order. So they appear twice: once as the ask, once where they happened.
+  const flagged = messages.filter((m) => m.for_offhand);
   return result({
     workspace_id: wsId,
     name: label || undefined,
     window: { since: since || undefined, until },
     count: messages.length,
     truncated: messages.length >= limit,
+    for_offhand: flagged.length ? flagged : undefined,
+    for_offhand_note: flagged.length ? FLAGGED_NOTE : undefined,
     voice_notes_omitted: includeVoice ? 0 : omitted,
     transcript_note: messages.some((m) => m.transcript) ? TRANSCRIPT_CAVEAT : undefined,
     messages,
