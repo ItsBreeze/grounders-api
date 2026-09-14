@@ -119,10 +119,18 @@ router.post('/', async (req, res, next) => {
 
     const callId = uuid();
     const { rows: [call] } = await pool.query(
+      // The channel is the call's own id, passed AGAIN as its own parameter
+      // rather than reused as `$1::text`. Postgres deduces a parameter's type
+      // from how it is used, and $1 sits in a uuid column and a text column in
+      // the same statement: "inconsistent types deduced for parameter $1", at
+      // runtime, on the very first real call. The suites never caught it
+      // because the harness stubs pool.query — a stub, not Postgres, decides
+      // what a statement means — which is exactly the failure this repo's
+      // conventions warn about, found here by a phone instead.
       `INSERT INTO radio_calls (id, workspace_id, started_by, callee_id, media, channel, state)
-       VALUES ($1, $2, $3, $4, $5, $1::text, 'ringing')
+       VALUES ($1, $2, $3, $4, $5, $6, 'ringing')
        RETURNING *`,
-      [callId, wsId, myId, callees.length === 1 ? callees[0] : null, media],
+      [callId, wsId, myId, callees.length === 1 ? callees[0] : null, media, callId],
     );
 
     // The caller is on the call the moment it exists — they are already in
