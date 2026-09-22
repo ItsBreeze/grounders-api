@@ -165,9 +165,13 @@ function baseUrl() {
 }
 
 /**
- * The shared partner key, under either of the two names it goes by.
+ * The shared LINK key, under either of the two names it goes by.
  *
- * There is ONE secret. This repo has always stored it as OFFHAND_PARTNER_KEY —
+ * This is no longer what the capture push presents — see captureKey below. It
+ * stays because it is the fallback that keeps an existing deploy working, and
+ * because it is still the credential for the link itself.
+ *
+ * There is ONE shared secret. This repo has always stored it as OFFHAND_PARTNER_KEY —
  * the key Offhand presents at /partner/offhand/link — and Offhand stores the
  * same string as GROUNDERS_PARTNER_KEY, which is also the name its capture
  * routes check it under. Both .env.example files have said so since the link
@@ -181,19 +185,43 @@ function baseUrl() {
  * the symptom would be kept calls quietly never arriving, with no status on
  * any row to explain it. Setting OFFHAND_BASE_URL is enough.
  *
- * The consequence is worth stating plainly, because it is new: that key used
- * to buy a read-only connector grant in this direction. Offhand's capture
- * routes now accept the same secret inbound, where it creates a note on an
- * account, writes audio into that account's storage and spends its allowance.
- * One lock, two doors. Rotating it is now a two-repo operation.
+ * It used to be that this same secret was also what the capture push sent, so
+ * one lock opened two doors — a read-only connector grant in this direction,
+ * and in the other a write that creates a note on an account, puts audio in
+ * that account's storage and spends its allowance. That is what captureKey
+ * below exists to undo.
  */
 function partnerKey() {
   return String(process.env.GROUNDERS_PARTNER_KEY || process.env.OFFHAND_PARTNER_KEY || '');
 }
 
+/**
+ * The credential the capture push presents, which is not the link's any more.
+ *
+ * The push writes: a note on somebody's account, audio in their storage, their
+ * recorded-time allowance spent. The link reads. Sharing one secret between
+ * them meant the read grant carried write authority, and no rotation could
+ * separate the two. RADIO_CAPTURE_KEY is that separation.
+ *
+ * The old key is still presented when the new one is absent, and that is the
+ * point rather than a leftover: this deploy must not go inert the moment it
+ * ships, because a push that finds no key is a kept call that quietly never
+ * arrives. Offhand accepts both during the rollout, so the two repos can be
+ * cut over on their own schedules.
+ *
+ * The length test is HERE and not only in isConfigured(): if any non-empty
+ * value won, a placeholder pasted into RADIO_CAPTURE_KEY would take precedence
+ * over a partner key that works, every push would 401 — and a 401 is terminal
+ * in outcomeFor, so those calls would be lost rather than retried.
+ */
+function captureKey() {
+  const own = String(process.env.RADIO_CAPTURE_KEY || '');
+  return own.length >= MIN_KEY_LENGTH ? own : partnerKey();
+}
+
 /** True when this deploy has both halves of the link and may attempt a push. */
 function isConfigured() {
-  return Boolean(baseUrl()) && partnerKey().length >= MIN_KEY_LENGTH;
+  return Boolean(baseUrl()) && captureKey().length >= MIN_KEY_LENGTH;
 }
 
 function r2() {
@@ -435,7 +463,7 @@ async function partnerPost(path, body) {
   const res = await fetch(`${baseUrl()}${path}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${partnerKey()}`,
+      Authorization: `Bearer ${captureKey()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),

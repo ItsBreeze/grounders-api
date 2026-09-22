@@ -139,9 +139,8 @@ describe. `services/offhand_push` is the push; the flag is demoted to what
 happens when the push cannot be made.
 
 **Two calls and a PUT, in that order**, against `OFFHAND_BASE_URL`, both
-carrying `Authorization: Bearer $GROUNDERS_PARTNER_KEY` — the shared partner
-key, which this API already holds under a second name
-([Configuration](#configuration)):
+carrying `Authorization: Bearer $RADIO_CAPTURE_KEY` — the push's own
+credential, not the link's ([Configuration](#configuration)):
 
 | Step | What |
 |---|---|
@@ -220,30 +219,37 @@ honours `audio/aac`. Without it an ADTS file lands under an `.m4a` key with an
 |---|---|
 | `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE` | `POST /radio/calls` answers 503 "Calling is not configured" and the app falls back to the toast it showed before calling existed. Same inert-without-a-key discipline as `radio_transcribe`. |
 | `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY`, `APNS_BUNDLE_ID` | No VoIP push is sent. Calls still ring over FCM: answerable from the notification, with no lock-screen ring on iOS. |
-| `OFFHAND_BASE_URL`, and the partner key (`GROUNDERS_PARTNER_KEY`, or `OFFHAND_PARTNER_KEY` — the same secret, see below) | No kept call is pushed to Offhand. Nothing is claimed and **no push status is written at all** — not `'failed'`, which would be a claim about work that was never attempted — so a deploy that is later given the credentials starts pushing new calls and leaves the old rows exactly as they are. The key must be at least 32 characters; anything shorter is treated as absent, because a placeholder is not a secret. |
+| `OFFHAND_BASE_URL`, and the capture key (`RADIO_CAPTURE_KEY`, falling back to the shared link key while the cutover is in progress — see below) | No kept call is pushed to Offhand. Nothing is claimed and **no push status is written at all** — not `'failed'`, which would be a claim about work that was never attempted — so a deploy that is later given the credentials starts pushing new calls and leaves the old rows exactly as they are. The key must be at least 32 characters; anything shorter is treated as absent, because a placeholder is not a secret. |
 
 The App Certificate is a signing key and never reaches a client: the phone
 asks for a token minted against a call it is actually on, and that token
 expires in an hour.
 
-**There is one partner key, and it now opens two doors.** The same secret is
-stored here as `OFFHAND_PARTNER_KEY` (the key Offhand presents at
-`/partner/offhand/link`, [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) and on Offhand's
-server as `GROUNDERS_PARTNER_KEY` — both `.env.example` files have said so since
-the link shipped. Offhand's capture routes check it under that second name,
-which is why the push reads `GROUNDERS_PARTNER_KEY` first and falls back to
-`OFFHAND_PARTNER_KEY`: a deploy that already has the link working has the value
-under the second name, and demanding it be pasted into a third variable would
-make the upgrade fail *silently* — the push is inert without a key, so the
-symptom would be kept calls never arriving with nothing on the row to say why.
-Setting `OFFHAND_BASE_URL` is enough.
+**The capture push has its own key now.** `RADIO_CAPTURE_KEY` here must equal
+`RADIO_CAPTURE_KEY` on Offhand's server. The link key is a different secret
+with a different job: stored here as `OFFHAND_PARTNER_KEY` (the key Offhand
+presents at `/partner/offhand/link`, [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) and
+as `GROUNDERS_PARTNER_KEY` over there.
 
-What that key buys has changed, and it is worth saying out loud: it used to
-mean "someone can read a Grounders feed as Offhand", and it now also means
-"someone can write notes into Offhand accounts, put audio in their storage and
-spend their allowance". Offhand refuses with `503 partner_unconfigured` rather
-than falling open when its own copy is missing or short, and compares it in
-constant time. Rotating it is a two-repository operation.
+They were one secret until now, and the reason they are two is worth saying out
+loud: the link key buys "someone can read a Grounders feed as Offhand", while
+the capture key means "someone can write notes into Offhand accounts, put audio
+in their storage and spend their allowance". Sharing one meant the read grant
+carried write authority and no rotation could tell them apart.
+
+The resolution order is `RADIO_CAPTURE_KEY`, then `GROUNDERS_PARTNER_KEY`, then
+`OFFHAND_PARTNER_KEY`, and the fallbacks are not tidiness — they are what stops
+this deploy going inert before it has been given the new key. Offhand accepts
+both for the same reason.
+
+**Deploy Offhand first.** A wrong key comes back `401 unauthorized`, which
+`outcomeFor` maps to `failed`, and failed is terminal: `claim()` will not take
+the row again and the sweep never revisits it. So setting `RADIO_CAPTURE_KEY`
+here before Offhand's both-keys middleware is live does not delay those kept
+calls, it loses them. The other order is safe — a server with neither key
+answers `503 partner_unconfigured`, which is a retry. A value under 32
+characters is ignored in favour of the fallback here for the same reason: a
+pasted placeholder must not become a lost recording.
 
 **Setting Agora up**: console.agora.io → create a project → copy the App ID →
 enable the App Certificate and copy it. The free tier is 10,000 minutes per

@@ -33,7 +33,7 @@ for (const key of [
   // call_id quietly POST a harness recording into the real Offhand, under a
   // real partner key, against whatever account that phone number resolves to.
   // The push suite sets them itself, per phase.
-  'OFFHAND_BASE_URL', 'GROUNDERS_PARTNER_KEY',
+  'OFFHAND_BASE_URL', 'GROUNDERS_PARTNER_KEY', 'RADIO_CAPTURE_KEY',
 ]) process.env[key] = '';
 
 const verbose = process.env.VERBOSE === '1';

@@ -659,3 +659,39 @@ say who said what and is not an identifier for anything. The connector's "no
 phone numbers" promise was about what an assistant can read and is still true;
 leaving it standing unqualified next to a server that now sends one would have
 been true by wording and false by impression.
+
+---
+
+## 21 September 2026 — the capture push gets its own key
+
+Reverses the decision recorded above under the partner key, which chose one
+shared secret for both directions and listed the reasons against a second one:
+a second rotation, a second way to be half-configured, and a silent failure
+mode on every deploy that set one and not the other.
+
+The objection that mattered was the last one, and it is answered rather than
+dismissed. Offhand's capture routes now accept EITHER `RADIO_CAPTURE_KEY` or
+the old shared key, so a deploy that sets neither keeps working and a deploy
+that sets only one keeps working. Nothing fails silently because nothing fails.
+
+What the earlier entry did not weigh heavily enough: the link key buys a
+read-only connector grant, and the capture key authorises a write into
+somebody's Offhand account — a note, audio in their storage, their allowance
+spent. One secret for both meant the read grant carried write authority, and no
+rotation could separate them. That is worth a second variable.
+
+Two things to keep in mind, both already in the code:
+
+- The placeholder guard in `captureKey()` is load-bearing. `unauthorized` maps
+  to `failed` in `outcomeFor`, and failed is terminal — `claim()` will not take
+  the row again and the sweep never revisits it. So a short value in
+  `RADIO_CAPTURE_KEY` is ignored in favour of the working fallback rather than
+  being sent, because sending it would lose every kept call in the window
+  instead of retrying them.
+- Deploy order is not symmetric, for the same reason. Offhand's both-keys
+  middleware goes first; the Grounders API's `RADIO_CAPTURE_KEY` goes last. The
+  reverse order 401s, and a 401 here is a lost recording.
+
+`GROUNDERS_PARTNER_KEY` must stay set on the Offhand server regardless — its
+own outbound link is gated on it, and without it the Grounders + Radio section
+disappears from the app with nothing the user can do about it.

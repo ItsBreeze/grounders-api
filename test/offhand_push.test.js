@@ -62,6 +62,7 @@
 process.env.OFFHAND_BASE_URL = '';
 process.env.GROUNDERS_PARTNER_KEY = '';
 process.env.OFFHAND_PARTNER_KEY = '';
+process.env.RADIO_CAPTURE_KEY = '';
 // The S3 client refuses to construct without credentials at all. Obvious
 // nonsense, so that anything reaching a real network fails loudly.
 process.env.R2_ACCOUNT_ID = 'harness-account';
@@ -336,6 +337,52 @@ run('offhand_push', async () => {
       named.opts.headers.Authorization === `Bearer ${KEY}-wire-contract-name`,
       named.opts.headers.Authorization);
 
+    // The capture key is the push's own credential, and it outranks both names
+    // of the shared link key. That split is the point of it: the link reads,
+    // this writes, and a leak of one should not be a leak of the other.
+    const CAPTURE_KEY = `${KEY}-capture-only`;
+    process.env.RADIO_CAPTURE_KEY = CAPTURE_KEY;
+    const own = await (async () => {
+      const probe = seed('9999bbbb-9999-4999-8999-999999999999');
+      defaults();
+      wire.length = 0;
+      await offhandPush.push(probe.id);
+      return wire[0];
+    })();
+    check('key: the capture key is what goes on the wire when it is set',
+      own.opts.headers.Authorization === `Bearer ${CAPTURE_KEY}`,
+      own.opts.headers.Authorization);
+
+    // A placeholder in the new variable must not outrank a key that works.
+    // Offhand answers 401 to a wrong key, and outcomeFor maps 401 to 'failed',
+    // which is terminal — so preferring any non-empty value here would turn one
+    // pasted "changeme" into every kept call lost, with no retry.
+    process.env.RADIO_CAPTURE_KEY = 'changeme';
+    const fell = await (async () => {
+      const probe = seed('9999cccc-9999-4999-8999-999999999999');
+      defaults();
+      wire.length = 0;
+      await offhandPush.push(probe.id);
+      return wire[0];
+    })();
+    check('key: a placeholder capture key falls back instead of being sent',
+      fell?.opts?.headers?.Authorization === `Bearer ${KEY}-wire-contract-name`,
+      // Undefined rather than wrong means nothing was sent at all: preferring
+      // the placeholder took isConfigured() below the length floor and the push
+      // went inert. Say which of the two it was.
+      fell ? fell.opts.headers.Authorization : 'nothing was sent — the push went inert');
+    check('key: and a placeholder does not make the deploy look unconfigured',
+      offhandPush.isConfigured() === true);
+
+    // The capture key alone is a complete configuration.
+    process.env.RADIO_CAPTURE_KEY = CAPTURE_KEY;
+    process.env.GROUNDERS_PARTNER_KEY = '';
+    process.env.OFFHAND_PARTNER_KEY = '';
+    check('key: the capture key on its own is enough', offhandPush.isConfigured() === true);
+
+    // Back to the shared key for the rest of the suite, which exercises the
+    // fallback arm every deploy will be on until it is cut over.
+    process.env.RADIO_CAPTURE_KEY = '';
     process.env.GROUNDERS_PARTNER_KEY = '';
     process.env.OFFHAND_PARTNER_KEY = '';
     process.env.OFFHAND_BASE_URL = '';
