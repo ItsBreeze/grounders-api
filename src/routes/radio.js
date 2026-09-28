@@ -69,6 +69,27 @@ async function isOwner(workspaceId, userId) {
   return rows.length > 0;
 }
 
+// The caller's self-workspace ("Your own notes"): one they own with nobody
+// else in it. Older accounts can have several, so every path that means
+// "my notes" goes through here and gets the same one — unnamed before named
+// (a named solo room like "ideas" was made on purpose), then the most
+// recently used. Null when there is none yet.
+async function findSelfWorkspaceId(userId, db = pool) {
+  const { rows: [row] } = await db.query(
+    `SELECT w.id
+       FROM radio_workspaces w
+      WHERE w.owner_id = $1
+        AND (SELECT COUNT(*) FROM radio_workspace_members m
+              WHERE m.workspace_id = w.id) = 1
+      ORDER BY (COALESCE(w.name, '') = '') DESC,
+               COALESCE((SELECT MAX(f.created_at) FROM radio_files f
+                          WHERE f.workspace_id = w.id), w.created_at) DESC
+      LIMIT 1`,
+    [userId]
+  );
+  return row ? row.id : null;
+}
+
 async function areFriends(userIdA, userIdB) {
   const [a, b] = userIdA < userIdB ? [userIdA, userIdB] : [userIdB, userIdA];
   const { rows } = await pool.query(
@@ -353,7 +374,12 @@ router.post('/workspaces', async (req, res, next) => {
     if (!allowDuplicate) {
       // Exact set equality: same member count, and nobody in the workspace
       // who is outside the requested set. Newest wins if there are already
-      // several (created before this reuse existed, or via allow_duplicate).
+      // several (created before this reuse existed, or via allow_duplicate)
+      // — except the caller alone, which is their notes and must resolve to
+      // the same room copy-to-self and the app's profile button land in.
+      const selfId = allMembers.length === 1
+        ? await findSelfWorkspaceId(myId, client)
+        : null;
       const { rows: [dupe] } = await client.query(
         `SELECT w.id, w.owner_id, w.name, w.color, w.created_at,
                 ARRAY(SELECT m2.user_id FROM radio_workspace_members m2
@@ -367,9 +393,9 @@ router.post('/workspaces', async (req, res, next) => {
               SELECT 1 FROM radio_workspace_members m
                WHERE m.workspace_id = w.id AND m.user_id <> ALL($3::uuid[])
             )
-          ORDER BY w.created_at DESC
+          ORDER BY (w.id = $4::uuid) IS TRUE DESC, w.created_at DESC
           LIMIT 1`,
-        [myId, allMembers.length, allMembers]
+        [myId, allMembers.length, allMembers, selfId]
       );
       if (dupe) {
         return res.json({
@@ -823,20 +849,8 @@ router.post('/files/:id/copy-to-self', async (req, res, next) => {
     }
 
     // Find existing self-workspace or create one.
-    const { rows: existing } = await pool.query(
-      `SELECT w.id
-         FROM radio_workspaces w
-         JOIN radio_workspace_members m ON m.workspace_id = w.id
-        WHERE w.owner_id = $1
-        GROUP BY w.id
-       HAVING COUNT(m.user_id) = 1
-        LIMIT 1`,
-      [myId]
-    );
-    let selfWsId;
-    if (existing.length) {
-      selfWsId = existing[0].id;
-    } else {
+    let selfWsId = await findSelfWorkspaceId(myId);
+    if (!selfWsId) {
       const newWsId = uuid();
       await pool.query(
         `INSERT INTO radio_workspaces (id, owner_id, name) VALUES ($1, $2, '')`,
