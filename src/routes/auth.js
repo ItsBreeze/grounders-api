@@ -71,6 +71,17 @@ function sanitizeUser(u) {
   };
 }
 
+// The demo number as a reviewer types it: ten 7s, or - as on 21 Oct 2026 - an
+// eleventh, which the app sends as +177777777777. A real +1 number is ten
+// digits, so any +1 number that starts with the demo digits is the reviewer.
+// shortcut: assumes a +1 demo number, generalise if APP_REVIEW_PHONE moves country.
+function isReviewPhone(phone) {
+  const want = process.env.APP_REVIEW_PHONE;
+  if (!want || !phone) return false;
+  const national = (s) => String(s).replace(/\D/g, '').replace(/^1/, '');
+  return /^\+?1/.test(String(phone).trim()) && national(phone).startsWith(national(want));
+}
+
 router.post('/request-otp', async (req, res, next) => {
   try {
     const { phone, email, client } = req.body;
@@ -82,7 +93,7 @@ router.post('/request-otp', async (req, res, next) => {
     const brand = client === 'radio' ? 'Radio' : 'Grounders';
 
     // Reviewer phone — pretend success without sending SMS or storing OTP.
-    if (phone && process.env.APP_REVIEW_PHONE && phone === process.env.APP_REVIEW_PHONE) {
+    if (isReviewPhone(phone)) {
       return res.json({ message: 'OTP sent' });
     }
 
@@ -123,15 +134,10 @@ router.post('/verify-otp', async (req, res, next) => {
     // request matches the reviewer env vars, mint tokens for the
     // pre-seeded reviewer user and skip the OTP table entirely. With
     // both vars unset this branch is dead code.
-    if (
-      process.env.APP_REVIEW_PHONE &&
-      process.env.APP_REVIEW_OTP &&
-      phone === process.env.APP_REVIEW_PHONE &&
-      code === process.env.APP_REVIEW_OTP
-    ) {
+    if (isReviewPhone(phone) && process.env.APP_REVIEW_OTP && code === process.env.APP_REVIEW_OTP) {
       const { rows } = await pool.query(
         `SELECT * FROM users WHERE phone = $1`,
-        [phone]
+        [process.env.APP_REVIEW_PHONE]
       );
       if (!rows.length) {
         return res.status(500).json({ error: 'Reviewer user missing — run the migration' });
