@@ -47,6 +47,7 @@ Response: `{ "token": "eyJ...", "user": {...}, "is_new": true }`
 | GET | `/users/me` | My profile with post_count, friend_count, total_distance_m, partner_link_enabled, radio_never_record |
 | PATCH | `/users/me` | Update display_name, partner_link_enabled (whether Offhand may link this account — see [MCP-CONNECTOR.md](MCP-CONNECTOR.md)) and/or radio_never_record (the calling opt-out — see [CALLING.md](CALLING.md)) |
 | GET | `/users/:id` | Another user's profile (friends or friend-of-friend only) |
+| DELETE | `/users/me` | Start deleting my account — see [Deleting an account](#deleting-an-account) |
 
 ---
 
@@ -149,6 +150,37 @@ protected_zones     — lat/lng only, 500m radius default
 ---
 
 ## Operations
+
+### Deleting an account
+
+`DELETE /users/me` soft-deletes: it stamps `deletion_pending_at`, removes the
+device and refresh tokens, revokes the connector's refresh tokens, and stamps
+`tokens_revoked_at`. `middleware/auth.js` reads that column on every request
+(one primary-key read) and answers 401 to any access token issued at or before
+it, and to a token whose account no longer exists — so the tokens already out,
+Edict's linked one included, stop at once. Signing in again with a code inside
+14 days cancels the deletion; the old tokens stay dead.
+
+After 14 days the daily reaper (`src/jobs/reap_users.js`, 03:00 UTC) deletes,
+per user, the stored files and then the row:
+
+- every `radio_files.r2_key` the user owns, and every one in a workspace they
+  own (those rows cascade with the workspace), except a key a surviving row
+  still points at (`copy-to-self` shares one object between two rows);
+- the media and thumbnail of their posts, when the URL's path is under
+  `posts/<their id>/` — `media_url` is whatever the client sent, so nothing
+  outside the user's own upload prefix is ever deleted on its word.
+
+Files go 25 at a time. If one will not delete, the user is kept and tried again
+the next night: the keys exist only in the rows. Without the `R2_*` variables
+the rows are deleted and a log line says no files were. Every step logs under
+`[reap_users]`.
+
+Not covered: an upload that was never attached to a post or a message (no row
+names it), `radio_storage_used_bytes` of other people whose files went with a
+deleted user's workspace, and recordings already pushed to Offhand.
+
+`npm run test:account_delete` — 35 checks, R2 and the database stubbed.
 
 ### Wiping every post — `src/scripts/wipe-posts.js`
 

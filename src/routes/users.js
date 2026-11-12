@@ -102,22 +102,32 @@ router.patch('/me', async (req, res, next) => {
 // Signing back in clears deletion_pending_at (see auth.js).
 router.delete('/me', async (req, res, next) => {
   try {
+    // tokens_revoked_at comes from this process's clock, not NOW(): it is
+    // compared with a token's iat, which this process's clock also wrote.
     await pool.query(
       `UPDATE users
-          SET deletion_pending_at = NOW()
+          SET deletion_pending_at = NOW(),
+              tokens_revoked_at   = $2
         WHERE id = $1
           AND deletion_pending_at IS NULL`,
-      [req.user.id]
+      [req.user.id, new Date()]
     );
     // Wipe device tokens immediately — no more pushes.
     await pool.query(
       `DELETE FROM device_tokens WHERE user_id = $1`,
       [req.user.id]
     );
-    // Wipe refresh tokens — JWT can still be used until expiry,
-    // but they can't refresh it.
+    // Wipe refresh tokens. The access tokens already issued died with the
+    // tokens_revoked_at stamp above (middleware/auth.js).
     await pool.query(
       `DELETE FROM refresh_tokens WHERE user_id = $1`,
+      [req.user.id]
+    );
+    // The connector's too (Claude, ChatGPT, Offhand): its access tokens are
+    // already refused while the deletion is pending (routes/mcp.js).
+    await pool.query(
+      `UPDATE oauth_refresh_tokens SET revoked_at = NOW()
+        WHERE user_id = $1 AND revoked_at IS NULL`,
       [req.user.id]
     );
     res.json({ deleted: true, hard_delete_in_days: 14 });

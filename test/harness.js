@@ -55,7 +55,15 @@ console.error = capture('error');
 const pool = require('../src/db/pool');
 const queries = [];
 let queryHandler = async () => ({ rows: [], rowCount: 0 });
+// requireAuth looks the bearer's account up on every request. The harness
+// answers that itself and leaves it out of `queries`, so each suite goes on
+// seeing only its route's own statements: `account` is the row it finds, a
+// live account unless a suite calls setAccount (null = no such account).
+let account = { tokens_revoked_at: null };
 pool.query = async (text, params) => {
+  if (/^\s*SELECT tokens_revoked_at FROM users WHERE id = \$1\s*$/.test(text)) {
+    return { rows: account ? [account] : [], rowCount: account ? 1 : 0 };
+  }
   queries.push({ text, params });
   return queryHandler(text, params);
 };
@@ -105,6 +113,7 @@ function boot() {
         queries,
         consoleLines,
         setQueryHandler(fn) { queryHandler = fn; },
+        setAccount(row) { account = row; },
         close: () => new Promise((r) => server.close(r)),
       });
     });

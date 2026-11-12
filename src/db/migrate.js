@@ -42,6 +42,12 @@ CREATE INDEX IF NOT EXISTS idx_users_deletion_pending
   ON users (deletion_pending_at)
   WHERE deletion_pending_at IS NOT NULL;
 
+-- Access tokens are JWTs and are stored nowhere, so they are revoked by date:
+-- middleware/auth.js refuses any token issued at or before this moment.
+-- Stamped by DELETE /users/me and never cleared: signing back in cancels the
+-- deletion, but the tokens from before it stay dead.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tokens_revoked_at TIMESTAMPTZ;
+
 -- The account owner's veto over the Offhand partner link (routes/partner.js),
 -- which issues a connector grant on a partner's word that it verified the
 -- phone. TRUE by default, including for every row that predates this column:

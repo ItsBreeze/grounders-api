@@ -718,3 +718,35 @@ the owner's account and no other. The veto reuses `partner_link_enabled`
 rather than a new opt-in column, which would have needed a migration and a
 hand-flipped row for one account. The route lives in its own file so the
 Offhand link stays exactly as it was.
+
+## 12 November 2026 — deleting an account takes the tokens and the files
+
+Two gaps in `DELETE /users/me`. The access token already issued kept working
+for up to 30 days, and after the reaper it named an account that was not
+there. And the reaper deleted rows only: every voice message, file and photo
+stayed in R2 with nothing left that knew its key.
+
+**Tokens.** `requireAuth` now reads `users.tokens_revoked_at` on every request
+and refuses a token issued at or before it, or one with no account. A version
+number in the token was the other design; it needs every place that signs a
+token to read the account first, and `routes/auth.js` is being rewritten on
+another branch. A date needs no change to signing. It is written from this
+process's clock, the same one that writes `iat`, not `NOW()`. The cost is one
+primary-key read per request, which the connector's `authenticate` already
+pays. Checking `deletion_pending_at` instead would have let the old tokens
+back in the moment the owner signed in again.
+
+**Files.** Objects first, then the row, and a user whose object will not
+delete is kept for the next night. The other order (rows, then best-effort
+objects, as the per-file routes do) loses the keys on the first failure, and
+here there is no user left to notice. The price is an account that outlives
+its 14 days while R2 is refusing; the log says so every night. Post media is
+taken from `media_url` only under `posts/<user id>/`: the column is
+client-supplied, and without the fence an account could name another's file
+and delete it by deleting itself. Listing that prefix in R2 would also catch
+uploads no post ever used, and was not taken: it needs a list permission no
+other code here has exercised, and a reaper that cannot list reaps nobody.
+
+**Edict's words.** A friend request reaches Edict as "Contact request" through
+an `edict: { title, body }` override on the send, so Edict tokens now get
+their own FCM message rather than sharing one with ItsRadio's Android tokens.
