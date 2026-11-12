@@ -695,3 +695,26 @@ Two things to keep in mind, both already in the code:
 `GROUNDERS_PARTNER_KEY` must stay set on the Offhand server regardless — its
 own outbound link is gated on it, and without it the Grounders + Radio section
 disappears from the app with nothing the user can do about it.
+
+---
+
+# Project log — Edict link
+
+## 11 November 2026 — an app token, not a connector grant
+
+Edict, the owner's Android voice launcher, reads and sends Radio itself with
+the calls ItsRadio makes, so it needs an app session; the connector (§6 of the
+connector log rejected app tokens for Offhand) would mean rewriting Edict's
+Radio code against `/mcp`. Its own phone sign-in worked but cost the ItsRadio
+app its sign-in: one refresh token per account, replaced on every sign-in.
+A refresh token per client was the other fix and was not taken: it changes
+the auth path every app uses, for one client.
+
+So `POST /partner/edict/link` mints only an access token — 30 days, no refresh
+token, no write of any kind — and Edict's PC renews it daily by calling again.
+The trust is the key holder being the owner, which no texted code backs, so
+the number is pinned on the server (`EDICT_LINK_PHONE`): a leaked key opens
+the owner's account and no other. The veto reuses `partner_link_enabled`
+rather than a new opt-in column, which would have needed a migration and a
+hand-flipped row for one account. The route lives in its own file so the
+Offhand link stays exactly as it was.

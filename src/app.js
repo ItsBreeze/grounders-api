@@ -21,6 +21,7 @@ const inviteRoutes   = require('./routes/invites');
 const mcpOauthRoutes = require('./routes/mcp_oauth');
 const mcpRoutes      = require('./routes/mcp');
 const partnerRoutes  = require('./routes/partner');
+const edictLinkRoutes = require('./routes/edict_link');
 
 require('./services/notifications');
 
@@ -104,6 +105,9 @@ app.use('/',                         mcpRoutes);
 // Offhand's built-in Grounders + Radio: a shared-key endpoint that issues the
 // same connector tokens for a phone Offhand has already verified.
 app.use('/',                         partnerRoutes);
+// Edict's Radio: a shared-key endpoint that issues an app access token for
+// the owner's own number, so Edict never signs the ItsRadio app out.
+app.use('/',                         edictLinkRoutes);
 
 app.use('/',                         blockRoutes);
 

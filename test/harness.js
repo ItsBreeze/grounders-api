@@ -34,6 +34,9 @@ for (const key of [
   // real partner key, against whatever account that phone number resolves to.
   // The push suite sets them itself, per phase.
   'OFFHAND_BASE_URL', 'GROUNDERS_PARTNER_KEY', 'RADIO_CAPTURE_KEY',
+  // The Edict link mints app sessions: a real key and number in a local .env
+  // must never be what a suite runs against. Its suite sets them itself.
+  'EDICT_PARTNER_KEY', 'EDICT_LINK_PHONE',
 ]) process.env[key] = '';
 
 const verbose = process.env.VERBOSE === '1';

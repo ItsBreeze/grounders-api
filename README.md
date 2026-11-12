@@ -258,3 +258,15 @@ works the way it does, the consent design, the schema, where a kept call goes
 and what happens when it cannot get there, the routes, configuration, cost,
 what has NOT been verified on a device, and tests
 (`npm run test:radio_call`, `npm run test:offhand_push`).
+
+---
+
+## Edict link
+
+`POST /partner/edict/link` gives Edict, the owner's voice launcher, an app
+access token for the owner's own number, so Edict never signs in a second
+time and never signs the ItsRadio app out. A shared key (`EDICT_PARTNER_KEY`)
+and a number pinned on the server (`EDICT_LINK_PHONE`); nothing is written.
+
+Its documentation lives in **[EDICT-LINK.md](EDICT-LINK.md)** — the route,
+the trust, configuration and tests (`npm run test:edict_link`).
