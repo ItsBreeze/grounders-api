@@ -666,5 +666,30 @@ run('radio_call', async () => {
     check('voip: an unknown platform is still refused', nonsense.status === 400, nonsense.status);
   }
 
+  // ── 16. A ringing call found without a push (Edict) ─────────
+  {
+    let asked = null;
+    const started = new Date(Date.now() - 10000).toISOString();
+    h.setQueryHandler((text, params) => {
+      if (/FROM radio_calls c\s+JOIN radio_call_participants p ON p\.call_id = c\.id\s+JOIN users u/.test(text)) {
+        asked = { text, params };
+        return { rows: [{ id: CALL, workspace_id: WS, media: 'audio', started_by: FRIEND, started_at: started, display_name: ' Alex ' }] };
+      }
+      return { rows: [] };
+    });
+    const r = await h.request('GET', '/radio/calls/pending', auth(ME));
+    check('pending: answers 200, not the /:id route', r.status === 200 && Array.isArray(r.json), r.status);
+    check('pending: the ring as the push would have said it',
+      r.json?.[0]?.call_id === CALL && r.json[0].sender_name === 'Alex' && r.json[0].from_user_id === FRIEND, JSON.stringify(r.json));
+    const left = r.json?.[0]?.ring_timeout_ms;
+    check('pending: with what is left of the ringing window', left > 30000 && left <= radioCall.RING_TIMEOUT_MS - 10000, left);
+    check('pending: only my ringing calls inside the window',
+      asked?.params?.[0] === ME && asked.params[1] === radioCall.RING_TIMEOUT_MS
+        && /c\.state = 'ringing'/.test(asked.text) && /p\.joined_at IS NULL OR c\.callee_id = p\.user_id/.test(asked.text),
+      asked?.text);
+    const none = await h.request('GET', '/radio/calls/pending', {});
+    check('pending: needs a sign-in', none.status === 401, none.status);
+  }
+
   await h.close();
 });

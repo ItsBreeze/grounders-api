@@ -157,6 +157,40 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /radio/calls/pending — the calls ringing for me right now. For a client
+// with no push (Edict, beside ItsRadio's own): it asks when it looks for new
+// messages, and rings for what is left of the window. Declared before /:id,
+// which would otherwise read "pending" as a call id.
+//
+// A call I placed is not ringing for me (my participant row has joined_at from
+// creation), except the self-call, where the callee is me too: that one rings
+// my other devices, and the device that placed it ignores it (it is dialing).
+router.get('/pending', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.workspace_id, c.media, c.started_by, c.started_at, u.display_name
+         FROM radio_calls c
+         JOIN radio_call_participants p ON p.call_id = c.id
+         JOIN users u ON u.id = c.started_by
+        WHERE p.user_id = $1
+          AND c.state = 'ringing'
+          AND p.left_at IS NULL
+          AND (p.joined_at IS NULL OR c.callee_id = p.user_id)
+          AND c.started_at > NOW() - ($2::double precision * INTERVAL '1 millisecond')
+        ORDER BY c.started_at DESC`,
+      [req.user.id, radioCall.RING_TIMEOUT_MS],
+    );
+    res.json(rows.map((r) => ({
+      call_id: r.id,
+      workspace_id: r.workspace_id,
+      media: r.media,
+      from_user_id: r.started_by,
+      sender_name: (r.display_name || '').trim() || 'Someone',
+      ring_timeout_ms: Math.max(0, radioCall.RING_TIMEOUT_MS - (Date.now() - new Date(r.started_at).getTime())),
+    })));
+  } catch (err) { next(err); }
+});
+
 // GET /radio/calls/:id — the ringing poll, and the catch-up read a phone does
 // when it comes back to the foreground. Resolves an unanswered call into a
 // missed one on the way past, so no timer has to live on the server.
