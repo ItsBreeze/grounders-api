@@ -12,7 +12,8 @@
  *      what they were without it.
  *
  *   3. What Edict is sent never says "Radio" or "ItsRadio" in its words:
- *      Edict shows these under its own name.
+ *      Edict shows these under its own name. A friend request reaches it as
+ *      a "Contact request", in words the other apps never see.
  *
  * Firebase is stubbed at firebase-admin; what is asserted is the message that
  * was about to go to FCM.
@@ -45,8 +46,12 @@ const { boot, check, run } = require('./harness');
 process.env.FIREBASE_PROJECT_ID = 'stub';
 process.env.FIREBASE_CLIENT_EMAIL = 'stub@example.invalid';
 process.env.FIREBASE_PRIVATE_KEY = 'stub';
+const loadedByApp = require('../src/services/notifications');
 delete require.cache[require.resolve('../src/services/notifications')];
 const notifications = require('../src/services/notifications');
+// The routes hold the first copy: point it at this one, so a route's own push
+// can be read here too.
+Object.assign(loadedByApp, notifications);
 const jwt = require('jsonwebtoken');
 
 const ME = '11111111-1111-4111-8111-111111111111';
@@ -73,6 +78,8 @@ run('edict_push', async () => {
           .filter((t) => app === null || t.app === app || (t.app === 'edict' && app === 'radio')),
       };
     }
+    if (/INSERT INTO friend_requests/.test(text)) return { rows: [{ id: 'r9' }] };
+    if (/SELECT display_name FROM users/.test(text)) return { rows: [{ display_name: ' Sam ' }] };
     return { rows: [], rowCount: 0 };
   });
 
@@ -97,6 +104,7 @@ run('edict_push', async () => {
     radio_call_ring: { title: 'Sam is calling', body: 'Tap to answer', app: 'radio',
       data: { type: 'radio_call_ring', call_id: 'c1', workspace_id: 'w1', from_user_id: 'u2', sender_name: 'Sam' } },
     friend_request: { title: 'New friend request', body: 'Sam wants to be friends', app: null,
+      edict: { title: 'Contact request', body: 'Sam wants to be your contact on Edict' },
       data: { type: 'friend_request', request_id: 'r1', from_user_id: 'u2' } },
   };
 
@@ -106,9 +114,11 @@ run('edict_push', async () => {
     check(`${type}: Edict gets one message`, mine.length === 1, mine.length);
     const m = mine[0] || { data: {} };
     check(`${type}: data-only, high priority`, !m.notification && !m.apns && m.android?.priority === 'high' && !m.android?.notification, m);
-    check(`${type}: the type and the words ride in data`, m.data.type === type && m.data.title === payload.title && m.data.body === payload.body, m.data);
+    const words = payload.edict || payload;
+    check(`${type}: the type and the words ride in data`, m.data.type === type && m.data.title === words.title && m.data.body === words.body, m.data);
     check(`${type}: every value is a string`, Object.values(m.data).every((v) => typeof v === 'string'), m.data);
     check(`${type}: its words never say Radio`, !/radio/i.test(`${m.data.title} ${m.data.body}`), m.data);
+    check(`${type}: no stray edict key in data`, !('edict' in m.data) && others(msgs).every((o) => !('edict' in o) && !('edict' in o.data)), msgs);
     const before = await push(payload, false);
     check(`${type}: the other apps get what they got without Edict`, JSON.stringify(others(msgs)) === JSON.stringify(before), others(msgs));
   }
@@ -116,6 +126,23 @@ run('edict_push', async () => {
   check('a message id comes with a message', toEdict(await push(EVENTS.radio_text))[0].data.file_id === 'f1');
   check('a call id comes with a call', toEdict(await push(EVENTS.radio_call_ring))[0].data.call_id === 'c1');
   check('a request id comes with a friend request', toEdict(await push(EVENTS.friend_request))[0].data.request_id === 'r1');
+
+  // The route's own words (routes/friends.js), end to end.
+  const asMe = { Authorization: `Bearer ${jwt.sign({ sub: ME }, process.env.JWT_SECRET, { expiresIn: '30d' })}` };
+  withEdict = true;
+  sent = [];
+  const fr = await h.request('POST', '/friends/requests', { headers: asMe, body: { to_user_id: '22222222-2222-4222-8222-222222222222' } });
+  for (let i = 0; i < 200 && sent.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+  const frEdict = toEdict(sent)[0] || { data: {} };
+  check('a friend request is made', fr.status === 201 || fr.status === 200, fr.text);
+  check('Edict is told "Contact request"', frEdict.data.title === 'Contact request', frEdict.data);
+  check('in the words "<name> wants to be your contact on Edict"', frEdict.data.body === 'Sam wants to be your contact on Edict', frEdict.data);
+  check('with the request and who it is from', frEdict.data.type === 'friend_request' && frEdict.data.request_id === 'r9' && frEdict.data.from_user_id === ME, frEdict.data);
+  const frOthers = others(sent);
+  check('Grounders and ItsRadio are told what they always were', frOthers.length === 1 && frOthers[0].tokens.length === 3
+    && frOthers[0].notification.title === 'New friend request' && frOthers[0].notification.body === 'Sam wants to be friends', frOthers);
+  check('nothing sent anywhere says Radio or ItsRadio to Edict, or Edict to the others',
+    !/radio/i.test(JSON.stringify(frEdict.data)) && !/edict|contact/i.test(JSON.stringify(frOthers.map((o) => [o.notification, o.data]))), sent);
 
   // Not Edict's: other Radio events, and everything of the Grounders app.
   for (const payload of [

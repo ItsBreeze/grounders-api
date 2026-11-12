@@ -66,10 +66,12 @@ async function sendToUser(userId, payload) {
 // so its tokens ride along on Radio sends and on the both-apps ones (app
 // null), for the events in EDICT_TYPES only. Always data-only: Edict fetches
 // and draws its own notification, under its own name. Nothing the other apps
-// receive changes. See EDICT-LINK.md.
+// receive changes. A caller may pass `edict: { title, body }` to word an event
+// differently for Edict alone (a friend request is a "contact request" there).
+// See EDICT-LINK.md.
 const EDICT_TYPES = new Set(['radio_text', 'radio_voice_memo', 'radio_file', 'friend_request', 'radio_call_ring']);
 
-async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' }) {
+async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders', edict }) {
   if (!initialized) return { sent: 0, failed: 0, skipped: true };
   if (!Array.isArray(userIds) || !userIds.length) return { sent: 0, failed: 0 };
 
@@ -94,9 +96,11 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
     if (v !== null && v !== undefined) stringData[k] = String(v);
   }
 
-  const selfRenders = r => r.app === 'edict' || (app === 'radio' && r.platform === 'android');
-  const selfRendered = rows.filter(selfRenders).map(r => r.token);
-  const systemRendered = rows.filter(r => !selfRenders(r)).map(r => r.token);
+  const isEdict = r => r.app === 'edict';
+  const selfRenders = r => app === 'radio' && r.platform === 'android';
+  const edictTokens = rows.filter(isEdict).map(r => r.token);
+  const selfRendered = rows.filter(r => !isEdict(r) && selfRenders(r)).map(r => r.token);
+  const systemRendered = rows.filter(r => !isEdict(r) && !selfRenders(r)).map(r => r.token);
 
   const CHUNK_SIZE = 500;
   const invalidTokens = [];
@@ -149,6 +153,13 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
   if (selfRendered.length) {
     await multicast(selfRendered, {
       data: { ...stringData, title: String(title ?? ''), body: String(body ?? '') },
+      android: { priority: 'high' },
+    });
+  }
+
+  if (edictTokens.length) {
+    await multicast(edictTokens, {
+      data: { ...stringData, title: String(edict?.title ?? title ?? ''), body: String(edict?.body ?? body ?? '') },
       android: { priority: 'high' },
     });
   }

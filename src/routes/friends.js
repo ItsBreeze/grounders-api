@@ -126,6 +126,7 @@ router.post('/requests', async (req, res, next) => {
         app:   null, // both apps surface friend requests
         title: 'New friend request',
         body:  `${senderName} wants to be friends`,
+        edict: { title: 'Contact request', body: `${senderName} wants to be your contact on Edict` },
         data:  {
           type: 'friend_request',
           request_id: request.id,
