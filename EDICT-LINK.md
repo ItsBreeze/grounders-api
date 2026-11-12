@@ -54,8 +54,36 @@ out.
 
 With either unset the route answers 503 and nothing else changes.
 
+## Push
+
+Edict registers its own FCM token with the linked token, as the apps do:
+`POST /devices { token, platform: "android", app: "edict" }`, and
+`DELETE /devices/:token` when it signs out. The Android app
+`xyz.brisebois.voicelauncher` is in the same Firebase project as the others,
+so the server's existing credentials deliver to it.
+
+Edict tokens ride along on Radio sends (`app: 'radio'`) and on the both-apps
+ones (`app: null`), for these `data.type`s only (`EDICT_TYPES` in
+`services/notifications.js`):
+
+| type | ids in `data` |
+|---|---|
+| `radio_text`, `radio_voice_memo`, `radio_file` | `file_id`, `workspace_id`, `from_user_id`, `sender_name` |
+| `friend_request` | `request_id`, `from_user_id` |
+| `radio_call_ring` | `call_id`, `workspace_id`, `from_user_id`, `sender_name` |
+
+Always data-only and high priority, with `title` and `body` inside `data`:
+Edict fetches and draws its own notification, under its own name, so a
+`notification` block would double it. What the Grounders and ItsRadio tokens
+receive is unchanged. No migration: `device_tokens.app` is free text.
+
 ## Tests
 
 `npm run test:edict_link` — 25 checks: the key and the fence, the veto and the
 closing account, that linking writes nothing and never names `refresh_tokens`,
 the token's claims and 30-day life, and that it opens `/radio` but not `/mcp`.
+
+`npm run test:edict_push` — 52 checks: each event reaches an Edict token once,
+data-only, with its id and no "Radio" in its words; the other apps' messages
+are byte-for-byte what they were without Edict; other events never reach it;
+registering and unregistering with the linked token.

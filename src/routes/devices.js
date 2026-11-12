@@ -20,7 +20,9 @@ router.use(requireAuth);
 const VALID_PLATFORMS = ['ios', 'android', 'web', 'ios_voip'];
 // Which client registered the token. Older builds send nothing and are
 // treated as the main Grounders app.
-const VALID_APPS = ['grounders', 'radio'];
+// 'edict' is the owner's Android voice launcher: it gets Radio's events as
+// data-only pushes (services/notifications.js).
+const VALID_APPS = ['grounders', 'radio', 'edict'];
 
 router.post('/', async (req, res, next) => {
   try {

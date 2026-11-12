@@ -61,6 +61,14 @@ async function sendToUser(userId, payload) {
 // the `notification` block so iOS, web and the Grounders app display as
 // before. The app only self-renders when the message has no notification
 // block, so the two paths can't double up.
+//
+// Edict (the owner's Android voice launcher, app 'edict') shows Radio itself,
+// so its tokens ride along on Radio sends and on the both-apps ones (app
+// null), for the events in EDICT_TYPES only. Always data-only: Edict fetches
+// and draws its own notification, under its own name. Nothing the other apps
+// receive changes. See EDICT-LINK.md.
+const EDICT_TYPES = new Set(['radio_text', 'radio_voice_memo', 'radio_file', 'friend_request', 'radio_call_ring']);
+
 async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' }) {
   if (!initialized) return { sent: 0, failed: 0, skipped: true };
   if (!Array.isArray(userIds) || !userIds.length) return { sent: 0, failed: 0 };
@@ -68,12 +76,13 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
   let rows;
   try {
     ({ rows } = await pool.query(
-      `SELECT token, platform FROM device_tokens
+      `SELECT token, platform, app FROM device_tokens
         WHERE user_id = ANY($1)
-          AND ($2::text IS NULL OR app = $2)
+          AND ($2::text IS NULL OR app = $2 OR (app = 'edict' AND $2 = 'radio'))
           AND platform <> 'ios_voip'`,
       [userIds, app]
     ));
+    rows = rows.filter(r => r.app !== 'edict' || EDICT_TYPES.has(data.type));
   } catch (err) {
     console.error('[notifications] token lookup failed:', err.message);
     return { sent: 0, failed: 0 };
@@ -85,8 +94,9 @@ async function sendToUsers(userIds, { title, body, data = {}, app = 'grounders' 
     if (v !== null && v !== undefined) stringData[k] = String(v);
   }
 
-  const selfRendered = rows.filter(r => app === 'radio' && r.platform === 'android').map(r => r.token);
-  const systemRendered = rows.filter(r => !(app === 'radio' && r.platform === 'android')).map(r => r.token);
+  const selfRenders = r => r.app === 'edict' || (app === 'radio' && r.platform === 'android');
+  const selfRendered = rows.filter(selfRenders).map(r => r.token);
+  const systemRendered = rows.filter(r => !selfRenders(r)).map(r => r.token);
 
   const CHUNK_SIZE = 500;
   const invalidTokens = [];
