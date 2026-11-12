@@ -69,7 +69,7 @@ ones (`app: null`), for these `data.type`s only (`EDICT_TYPES` in
 | type | ids in `data` |
 |---|---|
 | `radio_text`, `radio_voice_memo`, `radio_file` | `file_id`, `workspace_id`, `from_user_id`, `sender_name` |
-| `friend_request` | `request_id`, `from_user_id` |
+| `friend_request` | `request_id`, `from_user_id`; worded for Edict alone: title `Contact request`, body `<name> wants to be your contact on Edict` |
 | `radio_call_ring` | `call_id`, `workspace_id`, `from_user_id`, `sender_name` |
 
 Always data-only and high priority, with `title` and `body` inside `data`:
@@ -77,13 +77,25 @@ Edict fetches and draws its own notification, under its own name, so a
 `notification` block would double it. What the Grounders and ItsRadio tokens
 receive is unchanged. No migration: `device_tokens.app` is free text.
 
+A sender words an event differently for Edict by passing
+`edict: { title, body }` to `sendToUsers`; only Edict tokens get those words.
+
+## Deleting the account
+
+Edict's "Delete my messages account" calls `DELETE /users/me`; the linked
+token stops working with that call (README, "Deleting an account"). The web
+page Play's Data safety form asks for is drafted at
+`docs/edict/delete-account.html` — not served by this API and not published;
+intended address `https://brisebois.xyz/edict/delete-account`.
+
 ## Tests
 
 `npm run test:edict_link` — 25 checks: the key and the fence, the veto and the
 closing account, that linking writes nothing and never names `refresh_tokens`,
 the token's claims and 30-day life, and that it opens `/radio` but not `/mcp`.
 
-`npm run test:edict_push` — 52 checks: each event reaches an Edict token once,
-data-only, with its id and no "Radio" in its words; the other apps' messages
+`npm run test:edict_push` — 63 checks: each event reaches an Edict token once,
+data-only, with its id and no "Radio" in its words; a friend request reaches it
+as a "Contact request", from the route's own push; the other apps' messages
 are byte-for-byte what they were without Edict; other events never reach it;
 registering and unregistering with the linked token.

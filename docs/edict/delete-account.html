@@ -1,0 +1,79 @@
+<!doctype html>
+<!--
+  DRAFT. Not published, not linked from anything, not served by this API.
+  Intended address: https://brisebois.xyz/edict/delete-account
+  (the link Google Play's Data safety form asks for under "Delete account URL").
+  Before publishing: replace SUPPORT-EMAIL-TO-BE-SET in both places below, and
+  check the wording against the app's own sheet (strings ra_delete_*).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Delete your Edict account</title>
+<style>
+  :root { color-scheme: light dark; --text: #1a1a1a; --dim: #555; --bg: #fff; --line: #ddd; }
+  @media (prefers-color-scheme: dark) { :root { --text: #eee; --dim: #aaa; --bg: #111; --line: #333; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.55 system-ui, sans-serif; }
+  main { max-width: 40rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  h1 { font-size: 1.7rem; line-height: 1.2; margin: 0 0 .5rem; }
+  h2 { font-size: 1.15rem; margin: 2.2rem 0 .4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+  p, li { margin: .5rem 0; }
+  ol, ul { padding-left: 1.3rem; }
+  .dim { color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Delete your Edict account</h1>
+  <p class="dim">Edict is the voice launcher for Android by Joshua Brisebois. Your Edict messages account is the
+  account you signed in to with your phone number.</p>
+
+  <h2>Delete it in the app</h2>
+  <ol>
+    <li>Open Edict and go to <strong>Settings</strong>.</li>
+    <li>Tap <strong>Messages account</strong>.</li>
+    <li>Tap <strong>Delete my messages account</strong>.</li>
+    <li>Type <strong>delete</strong> to confirm, then tap <strong>Delete my account</strong>.</li>
+  </ol>
+  <p>Your phone is signed out right away, and message notifications stop on all your devices.</p>
+
+  <h2>Delete it by email</h2>
+  <p>If you no longer have the app, email <a href="mailto:SUPPORT-EMAIL-TO-BE-SET?subject=Delete%20my%20Edict%20account">SUPPORT-EMAIL-TO-BE-SET</a>
+  with the subject “Delete my Edict account” and the phone number you signed in with.
+  We will check that the number is yours before anything is deleted, then start the same deletion for you.</p>
+
+  <h2>The 14 days</h2>
+  <p>Deleting signs you out everywhere at once. Your account is then held for 14 days in case you change your mind.</p>
+  <ul>
+    <li>Sign in again with a code within 14 days and the deletion is cancelled. Your account stays as it was.</li>
+    <li>After 14 days everything is erased for good and cannot be brought back.</li>
+  </ul>
+
+  <h2>What is deleted</h2>
+  <p>This deletes your whole account from the server, not only from your phone. It is the same account the Grounders
+  apps use, so it is deleted there too.</p>
+  <ul>
+    <li>Your name and phone number</li>
+    <li>The messages, voice messages, photos and files you sent</li>
+    <li>Your contacts and contact requests</li>
+    <li>Conversations and groups you started, for everyone in them</li>
+    <li>Your place in groups other people started</li>
+    <li>Your call history</li>
+    <li>Your Grounders posts, with their photos, video and audio</li>
+    <li>The connections you gave to AI assistants to read your messages</li>
+  </ul>
+
+  <h2>What is not deleted</h2>
+  <ul>
+    <li>A copy of something you sent that another person saved to their own notes stays with them.</li>
+    <li>A call recording you chose to keep in Offhand stays in your Offhand account. Delete it there.</li>
+    <li>Edict's settings and anything stored only on your phone stay until you uninstall the app or clear its data.</li>
+  </ul>
+
+  <h2>Questions</h2>
+  <p>Email <a href="mailto:SUPPORT-EMAIL-TO-BE-SET">SUPPORT-EMAIL-TO-BE-SET</a>.</p>
+</main>
+</body>
+</html>
